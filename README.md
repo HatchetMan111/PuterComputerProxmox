@@ -51,6 +51,20 @@ PUTER_DOMAIN=192.168.178.96.nip.io bash -c "$(wget -qLO - https://raw.githubuser
 (CT-IP vorher ermitteln oder DHCP-Reservierung nutzen, damit sie stabil bleibt.)
 Hinweise: Nur die DNS-Auflösung läuft über einen öffentlichen Dienst — App-Daten bleiben im LAN. Router mit DNS-Rebind-Schutz (z. B. FritzBox) filtern solche Antworten ggf.; dann nip.io unter *Heimnetz → DNS-Rebind-Schutz → Ausnahmen* freigeben oder doch eigenes DNS nutzen.
 
+#### IP-Mode: ganz ohne DNS (`PUTER_IP_MODE=1`)
+
+Für Umgebungen mit unbekanntem DNS-Server (kein Wildcard möglich, kein nip.io gewünscht): Der Installer biegt API + S3 auf reine IP-Ports um — Caddy schreibt den Host-Header serverseitig auf `api.<CT-IP>` um, sodass Puters Subdomain-Gate greift, während Browser nur die CT-IP ansprechen. Komplett lokal, kein externer Dienst:
+
+```bash
+PUTER_IP_MODE=1 bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/PuterComputerProxmox/main/install/puter.sh)"
+```
+
+Erreichbar danach: Desktop/GUI `http://<CT-IP>` (:80), API `http://<CT-IP>:8080`, S3 `http://<CT-IP>:8081` (Ports via `PUTER_API_PORT`/`PUTER_S3_PORT` änderbar). Verifiziert: Login, Datei-Operationen, whoami, S3, Socket.io-Realtime, Cookies.
+
+Grenzen (technisch bedingt, kein Bug): User-Site-/App-Hosting (`<name>.site.<domain>`, dynamische Subdomains) geht ohne DNS nicht — dafür braucht es Wildcard-DNS oder nip.io. Alles andere (Desktop, Dateien, Store-Apps, Freigaben, KI-Provider) läuft.
+
+Technisch: `docker-compose.override.yml` (Caddy-Ports, updatefest) + generierte `caddy/Caddyfile` (Host-Rewrite, Backup als `Caddyfile.stock`) + `api_base_url`/`publicEndpoint`/`domain` in `config.json`. Zurück auf DNS-Modus: Installer ohne `PUTER_IP_MODE` erneut ausführen (räumt Override/Caddyfile/Keys sauber auf).
+
 ---
 
 ## Installation (Einzeiler)
@@ -111,6 +125,9 @@ Info: Verifying web UI from the Proxmox host: http://192.168.178.50:80/
 | `PUTER_STORAGE` | `local-lvm` | Storage für CT-Rootfs |
 | `PUTER_BRIDGE` | `vmbr0` | Netzwerk-Bridge |
 | `PUTER_VERSION_TEMPLATE` | `13` | Debian-Version des LXC-Templates |
+| `PUTER_UNPRIVILEGED` | `1` | `1` = unprivileged (Default), `0` = privileged (nötig bei Images mit exotischen UIDs, siehe Debugging) |
+| `PUTER_IP_MODE` | `0` | `1` = No-DNS-Modus: API auf `:8080`, S3 auf `:8081`, alles per reiner CT-IP (siehe unten) |
+| `PUTER_API_PORT` / `PUTER_S3_PORT` | 8080 / 8081 | Ports des IP-Modes (nur wenn `PUTER_IP_MODE=1`) |
 
 Beispiel — kleiner CT mit anderem Storage:
 

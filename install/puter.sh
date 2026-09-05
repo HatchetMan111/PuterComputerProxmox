@@ -48,6 +48,12 @@ PUTER_UNPRIVILEGED="${PUTER_UNPRIVILEGED:-1}"
 PUTER_DOMAIN="${PUTER_DOMAIN:-}"
 # HTTP port of the web UI (Caddy listen port inside the CT)
 PUTER_PORT="${PUTER_PORT:-80}"
+# IP-Mode (no DNS needed): 1 = serve API+S3 on bare IP ports (Caddy rewrites
+# Host to api.<CT-IP> server-side). Core features work; user site/app hosting
+# still needs wildcard DNS. 0 = standard DNS mode (default).
+PUTER_IP_MODE="${PUTER_IP_MODE:-0}"
+PUTER_API_PORT="${PUTER_API_PORT:-8080}"
+PUTER_S3_PORT="${PUTER_S3_PORT:-8081}"
 
 # ── Colors (community-scripts style) ────────────────────────────────────────
 if [[ -t 1 ]] && [[ "${PUTER_NO_COLOR:-}" != "1" ]]; then
@@ -145,6 +151,10 @@ if ! pvesh get /storage --output json 2>/dev/null | grep -q "\"${PUTER_STORAGE}\
 fi
 if [[ "$PUTER_UNPRIVILEGED" != "0" && "$PUTER_UNPRIVILEGED" != "1" ]]; then
     msg_error "PUTER_UNPRIVILEGED must be 0 (privileged, for images with exotic UIDs) or 1 (unprivileged, default)."
+    exit 1
+fi
+if [[ "$PUTER_IP_MODE" != "0" && "$PUTER_IP_MODE" != "1" ]]; then
+    msg_error "PUTER_IP_MODE must be 0 (standard DNS mode, default) or 1 (no-DNS IP mode)."
     exit 1
 fi
 
@@ -303,8 +313,8 @@ case "$(guest_type "$PUTER_CTID")" in
 esac
 UPDATE_MODE=$HAS_INSTALL
 
-# ── Domain (prompt only for fresh installs; update keeps configured domain) ──
-if [[ "$HAS_INSTALL" -eq 0 ]]; then
+# ── Domain (prompt only for fresh DNS-mode installs) ─────────────────────────
+if [[ "$HAS_INSTALL" -eq 0 && "$PUTER_IP_MODE" != "1" ]]; then
     ask_domain
 fi
 if [[ "$UPDATE_MODE" -eq 1 ]]; then
@@ -391,7 +401,7 @@ if [[ "$NEED_CREATE" -eq 1 ]]; then
         fi
         ensure_running_and_detect
         UPDATE_MODE=$HAS_INSTALL
-        if [[ "$HAS_INSTALL" -eq 0 ]]; then
+        if [[ "$HAS_INSTALL" -eq 0 && "$PUTER_IP_MODE" != "1" ]]; then
             ask_domain
         fi
     else
@@ -415,6 +425,12 @@ if [[ -z "$CT_IP" ]]; then
     exit 1
 fi
 msg_ok "Container IP: ${CT_IP}"
+
+# IP-Mode: domain IS the CT IP (assigned now that the IP is known); no DNS.
+if [[ "$PUTER_IP_MODE" == "1" ]]; then
+    PUTER_DOMAIN="$CT_IP"
+    msg_info "IP-Mode: domain = CT IP (${CT_IP}); no DNS needed (API :${PUTER_API_PORT}, S3 :${PUTER_S3_PORT})"
+fi
 
 # ── Fetch and push container-side installer + systemd unit (GitHub-first) ──
 msg_info "Fetching puter-install.sh + puter.service from repo"
@@ -441,6 +457,9 @@ export PUTER_DOMAIN='${PUTER_DOMAIN}'
 export PUTER_PORT='${PUTER_PORT}'
 export PUTER_CTIP='${CT_IP}'
 export UPDATE_MODE='${UPDATE_MODE}'
+export PUTER_IP_MODE='${PUTER_IP_MODE}'
+export PUTER_API_PORT='${PUTER_API_PORT}'
+export PUTER_S3_PORT='${PUTER_S3_PORT}'
 bash /tmp/puter-install.sh 2>&1 | tee /var/log/puter-install.log
 "
 msg_ok "In-container install finished (log: /var/log/puter-install.log)"
@@ -475,17 +494,43 @@ else
     exit 1
 fi
 
-# api-subdomain check (only meaningful once wildcard DNS is set up) —
-# report, but do not fail the install on it.
-msg_info "Probing api.${PUTER_DOMAIN} (needs wildcard DNS -> ${CT_IP}; informational)"
-if curl -fsS -m 8 -o /dev/null -H "Host: api.${PUTER_DOMAIN}" "http://${CT_IP}:${PUTER_PORT}/whoami" 2>/dev/null; then
-    msg_ok "api.${PUTER_DOMAIN} reachable via Host header (wildcard DNS will work)"
-else
-    echo -e "  ${YW}⚠${CL} api.${PUTER_DOMAIN} not answering yet — set wildcard DNS *.${PUTER_DOMAIN} -> ${CT_IP}, then re-check${CL}"
-fi
+# api-subdomain routing check (standard DNS mode only; informational).
+# POST /readdir without token must answer 401 (route exists, auth required) —
+# a 404 here means the api subdomain does not route (wildcard DNS missing).
+if [[ "$PUTER_IP_MODE" != "1" ]]; then
+    msg_info "Probing api.${PUTER_DOMAIN} routing (Host header -> ${CT_IP}; informational)"
+    API_PROBE=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -H "Host: api.${PUTER_DOMAIN}" \
+        -X POST -H 'Content-Type: application/json' -d '{"path":"/"}' \
+        "http://${CT_IP}:${PUTER_PORT}/readdir" 2>/dev/null || echo 000)
+    if [[ "$API_PROBE" == "401" ]]; then
+        msg_ok "api.${PUTER_DOMAIN} routes to backend (HTTP 401 = auth required, routing works)"
+    else
+        echo -e "  ${YW}⚠${CL} api.${PUTER_DOMAIN} probe returned HTTP ${API_PROBE} (expected 401) — check wildcard DNS *.${PUTER_DOMAIN} -> ${CT_IP}${CL}"
+    fi
 
-# Resolvability from host + CT (warning only — see check_dns)
-check_dns
+    # Resolvability from host + CT (warning only — see check_dns)
+    check_dns
+else
+    # IP-Mode: verify API + S3 on bare IP ports (401/403 prove routing)
+    msg_info "Verifying IP-Mode API from host: http://${CT_IP}:${PUTER_API_PORT}/readdir (expect 401)"
+    API_PROBE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' \
+        -X POST -H 'Content-Type: application/json' -d '{"path":"/"}' \
+        "http://${CT_IP}:${PUTER_API_PORT}/readdir" 2>/dev/null || echo 000)
+    if [[ "$API_PROBE" != "401" ]]; then
+        msg_error "IP-Mode API check from host failed (HTTP ${API_PROBE}, expected 401)"
+        exit 1
+    fi
+    msg_ok "IP-Mode API reachable from host (HTTP 401)"
+
+    msg_info "Verifying IP-Mode S3 from host: http://${CT_IP}:${PUTER_S3_PORT}/ (expect 403)"
+    S3_PROBE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' \
+        "http://${CT_IP}:${PUTER_S3_PORT}/" 2>/dev/null || echo 000)
+    if [[ "$S3_PROBE" != "403" ]]; then
+        msg_error "IP-Mode S3 check from host failed (HTTP ${S3_PROBE}, expected 403)"
+        exit 1
+    fi
+    msg_ok "IP-Mode S3 reachable from host (HTTP 403)"
+fi
 
 # ── First-boot admin password (Puter prints it once on first boot) ──────────
 ADMIN_PW_LINES=$(pct exec "$PUTER_CTID" -- bash -c \
@@ -498,11 +543,16 @@ if [[ -n "$ADMIN_PW_LINES" ]]; then
 fi
 
 # ── CT description + tags (community-scripts style) ────────────────────────
+if [[ "$PUTER_IP_MODE" == "1" ]]; then
+    CT_DESC_EXTRA="IP-Mode, no DNS needed (API :${PUTER_API_PORT}, S3 :${PUTER_S3_PORT})"
+else
+    CT_DESC_EXTRA="Domain: ${PUTER_DOMAIN}"
+fi
 pct set "$PUTER_CTID" \
     --description "<div align='center'>
   <a href='https://github.com/HeyPuter/puter'><img src='https://assets.puter.site/puter-logo.png' alt='Puter' style='width:60px;'/></a>
   <h2 style='font-size:18px;'>Puter LXC</h2>
-  <p>Web UI: <a href='http://${CT_IP}:${PUTER_PORT}'>http://${CT_IP}:${PUTER_PORT}</a> — Domain: ${PUTER_DOMAIN}</p>
+  <p>Web UI: <a href='http://${CT_IP}:${PUTER_PORT}'>http://${CT_IP}:${PUTER_PORT}</a> — ${CT_DESC_EXTRA}</p>
   <p style='font-size:12px;'>Community-scripts style installer · Update: re-run installer · Remove: pct destroy ${PUTER_CTID}</p>
 </div>" \
     --tags "${PUTER_TAG}" >/dev/null
@@ -512,11 +562,18 @@ msg_ok "CT description + tags set"
 echo ""
 echo -e "${GN}${BOLD}✔ ${APP} setup has been successfully initialized!${CL}"
 echo ""
-echo -e "  ${BGN}Web UI  :${CL} http://${CT_IP}:${PUTER_PORT}   (domain: ${PUTER_DOMAIN})"
-if [[ "${DNS_OK:-0}" -eq 1 ]]; then
-    echo -e "  ${BGN}DNS     :${CL} *.${PUTER_DOMAIN} -> ${CT_IP}  ${GN}(resolving ✓)${CL}"
+if [[ "$PUTER_IP_MODE" == "1" ]]; then
+    echo -e "  ${BGN}Web UI  :${CL} http://${CT_IP}:${PUTER_PORT}   (IP-Mode, no DNS needed)"
+    echo -e "  ${BGN}API     :${CL} http://${CT_IP}:${PUTER_API_PORT}  (desktop talks here automatically)"
+    echo -e "  ${BGN}S3      :${CL} http://${CT_IP}:${PUTER_S3_PORT}  (file uploads/downloads)"
+    echo -e "  ${BGN}Limits  :${CL} user site/app hosting needs wildcard DNS (see README)"
 else
-    echo -e "  ${BGN}DNS     :${CL} *.${PUTER_DOMAIN} -> ${CT_IP}  ${RD}(NOT resolving — fix DNS, see warning above!)${CL}"
+    echo -e "  ${BGN}Web UI  :${CL} http://${CT_IP}:${PUTER_PORT}   (domain: ${PUTER_DOMAIN})"
+    if [[ "${DNS_OK:-0}" -eq 1 ]]; then
+        echo -e "  ${BGN}DNS     :${CL} *.${PUTER_DOMAIN} -> ${CT_IP}  ${GN}(resolving ✓)${CL}"
+    else
+        echo -e "  ${BGN}DNS     :${CL} *.${PUTER_DOMAIN} -> ${CT_IP}  ${RD}(NOT resolving — fix DNS, see warning above!)${CL}"
+    fi
 fi
 echo -e "  ${BGN}Login   :${CL} user 'admin' + first-boot temp password (install log)"
 echo -e "  ${BGN}Logs    :${CL} pct exec ${PUTER_CTID} -- journalctl -u puter -f"
