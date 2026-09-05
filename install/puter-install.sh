@@ -71,6 +71,37 @@ on_error() {
 }
 trap 'on_error $? $LINENO "${BASH_COMMAND}"' ERR
 
+# ── Docker idmap failure detection ──────────────────────────────────────────
+# Some images ship layers with out-of-range UIDs (e.g. UID 718322462).
+# Inside an UNPRIVILEGED LXC (64k UID idmap) extraction fails with
+# "failed to Lchown ... invalid argument". The containerd "increase
+# subuid/subgid" hint does NOT apply inside LXC. Detect the signature and
+# fail with the real cause + fix instead of a generic error.
+is_idmap_failure() {  # exit 0 if $1 contains the signature
+    grep -qiE "failed to (extract layer|lchown)|lchown.*invalid argument" "$1" 2>/dev/null
+}
+print_idmap_diagnosis() {
+    echo "IDMAP_FAILURE_DETECTED" >&2
+    msg_error "Docker cannot extract an image layer: image UIDs exceed this container's idmap."
+    msg_error "Root cause: unprivileged LXC maps only 64k UIDs; the image needs more (lchown EINVAL)."
+    msg_error "Fix: recreate the CT privileged — on the host: PUTER_UNPRIVILEGED=0 <installer> — or use a QEMU VM."
+}
+# compose_q: quiet docker compose op; on failure prints tail + idmap diagnosis.
+compose_q() {
+    local log
+    log=$(mktemp /tmp/puter-compose-XXXXXX.log)
+    if docker compose "$@" >"$log" 2>&1; then
+        rm -f "$log"
+        return 0
+    fi
+    tail -n 40 "$log" >&2
+    if is_idmap_failure "$log"; then
+        print_idmap_diagnosis
+    fi
+    rm -f "$log"
+    return 1
+}
+
 # ── Preflight ────────────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || { msg_error "Run as root inside the CT."; exit 1; }
 msg_info "In-container install starting (domain=${PUTER_DOMAIN}, port=${PUTER_PORT}, ip=${PUTER_CTIP:-dhcp}, update-mode=${UPDATE_MODE})"
@@ -137,8 +168,8 @@ if [[ -f "${COMPOSE_DIR}/docker-compose.yml" && -f "${COMPOSE_DIR}/.env" ]]; the
         puter/data/s3 puter/data/puter puter/data/caddy 2>/dev/null || true
     chmod 0777 puter/config 2>/dev/null || true
     chmod 0666 puter/config/config.json 2>/dev/null || true
-    STD docker compose pull
-    STD docker compose up -d --remove-orphans
+    compose_q pull || exit 1
+    compose_q up -d --remove-orphans || exit 1
     msg_ok "Puter stack updated (compose pull + up)"
 else
     msg_info "Running official Puter self-host installer"
@@ -146,17 +177,28 @@ else
     # Official installer: downloads docker-compose.yml + caddy/Caddyfile,
     # generates secrets, writes .env + puter/config/config.json (idempotent:
     # keeps existing secrets), runs docker compose up -d.
+    # Output is tee'd to a temp log so a Docker idmap failure can be diagnosed
+    # with the real cause instead of a generic error.
+    OFFICIAL_LOG=$(mktemp /tmp/puter-official-XXXXXX.log)
     if ! curl -fsSL https://raw.githubusercontent.com/HeyPuter/puter/main/install.sh \
         | env PUTER_DIR="$COMPOSE_DIR" \
               PUTER_DOMAIN="$PUTER_DOMAIN" \
               PUTER_PORT="$PUTER_PORT" \
               PUTER_ENV=prod \
               PUTER_TRUST_PROXY=1 \
-              sh; then
-        msg_error "Official Puter installer failed — full output above"
+              sh 2>&1 | tee "$OFFICIAL_LOG"; then
+        if is_idmap_failure "$OFFICIAL_LOG"; then
+            print_idmap_diagnosis
+        else
+            msg_error "Official Puter installer failed — full output above"
+        fi
+        rm -f "$OFFICIAL_LOG"
         exit 1
     fi
+    rm -f "$OFFICIAL_LOG"
     msg_ok "Puter stack installed via official installer"
+    # Re-assert desired state through our own wrapper (idempotent no-op).
+    compose_q up -d --remove-orphans || exit 1
 fi
 
 cd "$COMPOSE_DIR"

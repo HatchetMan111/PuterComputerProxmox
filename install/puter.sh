@@ -38,6 +38,10 @@ PUTER_DISK="${PUTER_DISK:-8}"
 PUTER_BRIDGE="${PUTER_BRIDGE:-vmbr0}"
 PUTER_STORAGE="${PUTER_STORAGE:-local-lvm}"
 PUTER_TAG="${PUTER_TAG:-ai;cloud;community-script}"
+# Privilege mode of the CT: 1 = unprivileged (default, fine for well-behaved
+# images), 0 = privileged (needed when an image ships out-of-range UIDs that
+# cannot be extracted in a 64k idmap — "failed to Lchown ... invalid argument").
+PUTER_UNPRIVILEGED="${PUTER_UNPRIVILEGED:-1}"
 # Public domain Puter serves on. MUST be resolvable via wildcard DNS
 # (*.PUTER_DOMAIN -> CT IP). Puter 26.x gates 95+ backend routes behind
 # the api.<domain> subdomain — see README section "DNS".
@@ -82,6 +86,17 @@ on_error() {
         pct exec "$PUTER_CTID" -- bash -c \
             'systemctl status puter --no-pager -l 2>&1 | tail -n 25' >&2 2>/dev/null || true
         echo "" >&2
+        # Docker idmap wall? → precise remediation instead of a generic failure
+        if pct exec "$PUTER_CTID" -- bash -c \
+            'grep -qiE "failed to (extract layer|lchown)|lchown.*invalid argument|IDMAP_FAILURE_DETECTED" /var/log/puter-install.log 2>/dev/null'; then
+            echo -e "${YW}  ── DIAGNOSIS: Docker image UIDs exceed the container idmap ──${CL}" >&2
+            echo -e "  Unprivileged LXC (64k UIDs) + image with out-of-range UIDs = lchown EINVAL." >&2
+            echo -e "  The 'increase subuid/subgid' hint does NOT apply inside LXC." >&2
+            echo -e "  Fix: recreate the CT privileged, then re-run the installer:" >&2
+            echo -e "    pct stop ${PUTER_CTID} && pct destroy ${PUTER_CTID} --purge" >&2
+            echo -e "    PUTER_UNPRIVILEGED=0 PUTER_CTID=${PUTER_CTID} bash -c \"\$(wget -qLO - ${PUTER_REPO_RAW}/install/puter.sh)\"" >&2
+            echo "" >&2
+        fi
     fi
     echo -e "${RD}════════════════════════════════════════════════════════════${CL}" >&2
 }
@@ -119,6 +134,10 @@ if ! pvesh get /storage --output json 2>/dev/null | grep -q "\"${PUTER_STORAGE}\
     msg_error "Storage '${PUTER_STORAGE}' not found on this node. Available storages:"
     pvesh get /storage --output json 2>/dev/null \
         | grep -oE '"storage":"[^"]*"' | cut -d'"' -f4 | sed 's/^/    /' >&2 || true
+    exit 1
+fi
+if [[ "$PUTER_UNPRIVILEGED" != "0" && "$PUTER_UNPRIVILEGED" != "1" ]]; then
+    msg_error "PUTER_UNPRIVILEGED must be 0 (privileged, for images with exotic UIDs) or 1 (unprivileged, default)."
     exit 1
 fi
 
@@ -296,7 +315,7 @@ if [[ "$NEED_CREATE" -eq 1 ]]; then
     fi
     msg_ok "Template: ${TEMPLATE}"
 
-    msg_info "Creating LXC ${PUTER_CTID} (${PUTER_CTHOSTNAME}: ${PUTER_CORES} vCPU, ${PUTER_RAM} MiB RAM, ${PUTER_DISK} GB disk, storage: ${PUTER_STORAGE})"
+    msg_info "Creating LXC ${PUTER_CTID} (${PUTER_CTHOSTNAME}: ${PUTER_CORES} vCPU, ${PUTER_RAM} MiB RAM, ${PUTER_DISK} GB disk, storage: ${PUTER_STORAGE}, $([[ "$PUTER_UNPRIVILEGED" == "0" ]] && echo privileged || echo unprivileged))"
     if CREATE_OUT=$(pct create "$PUTER_CTID" "$TEMPLATE" \
             --hostname "$PUTER_CTHOSTNAME" \
             --cores "$PUTER_CORES" \
@@ -305,7 +324,7 @@ if [[ "$NEED_CREATE" -eq 1 ]]; then
             --rootfs "${PUTER_STORAGE}:${PUTER_DISK}" \
             --net0 "name=eth0,bridge=${PUTER_BRIDGE},ip=dhcp,type=veth" \
             --features nesting=1,keyctl=1 \
-            --unprivileged 1 \
+            --unprivileged "$PUTER_UNPRIVILEGED" \
             --onboot 1 \
             --start 0 2>&1); then
         msg_ok "Created LXC ${PUTER_CTID}"

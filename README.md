@@ -175,6 +175,15 @@ Zusätzlich verifiziert im Testlauf:
   ```
 - **Logs im CT**: `/var/log/puter-install.log`, `journalctl -u puter`, `docker compose logs`.
 
+### Docker: `failed to extract layer` / `lchown ... invalid argument`
+
+Manche Images enthalten Layer mit UIDs außerhalb der 64k-idmap eines **unprivilegierten** LXCs (z. B. UID 718322462). Der Installer erkennt die Signatur, meldet `IDMAP_FAILURE_DETECTED` mit der echten Ursache und bricht sauber ab. (Der containerd-Hinweis „subuid/subgid erhöhen" gilt **nicht** im LXC.) Fix — CT privilegiert neu erstellen:
+
+```bash
+pct stop <CTID> && pct destroy <CTID> --purge
+PUTER_UNPRIVILEGED=0 PUTER_CTID=<CTID> bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/PuterComputerProxmox/main/install/puter.sh)"
+```
+
 ## Struktur
 
 ```
