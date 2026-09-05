@@ -194,6 +194,10 @@ ask_domain() {
     local input=""
     read -r -p "$(echo -e "${YW}Domain to serve Puter on [puter.lan]:${CL}") " input || true
     PUTER_DOMAIN="${input:-puter.lan}"
+    if [[ "$PUTER_DOMAIN" =~ ^[0-9.]+$ ]]; then
+        echo -e "  ${YW}⚠ '${PUTER_DOMAIN}' is a bare IP: 'api.<ip>' can never resolve, so login/API will fail.${CL}"
+        echo -e "  ${YW}  Use a real domain with wildcard DNS — or '<ct-ip-with-dashes>.nip.io' (see README).${CL}"
+    fi
 }
 ensure_running_and_detect() {
     # For an existing LXC: start it if needed, verify pct exec works,
@@ -213,6 +217,44 @@ ensure_running_and_detect() {
         HAS_INSTALL=1
     else
         HAS_INSTALL=0
+    fi
+}
+
+# ── DNS resolvability check (warning only — the install itself is fine) ─────
+# Browsers must resolve BOTH names; a loading GUI shell means nothing.
+# Sets DNS_OK=1/0. Never fails the install (DNS can be fixed afterwards).
+check_dns() {
+    msg_info "Checking DNS: ${PUTER_DOMAIN} + api.${PUTER_DOMAIN} must resolve (wildcard -> ${CT_IP})"
+    DNS_OK=1
+    local h resolved
+    for h in "${PUTER_DOMAIN}" "api.${PUTER_DOMAIN}"; do
+        resolved=$(getent hosts "$h" 2>/dev/null | awk '{print $1}' | head -n1 || true)
+        if [[ -z "$resolved" ]]; then
+            msg_error "Does NOT resolve (Proxmox host): ${h}"
+            DNS_OK=0
+        elif [[ "$resolved" != "$CT_IP" ]]; then
+            echo -e "  ${YW}⚠${CL} Resolves to UNEXPECTED ip (host): ${h} -> ${resolved} (expected ${CT_IP})"
+            DNS_OK=0
+        else
+            msg_ok "Resolves (host): ${h} -> ${resolved}"
+        fi
+        if ! pct exec "$PUTER_CTID" -- getent hosts "$h" >/dev/null 2>&1; then
+            msg_error "Does NOT resolve (inside CT): ${h}"
+            DNS_OK=0
+        fi
+    done
+    if [[ "$DNS_OK" -ne 1 ]]; then
+        echo ""
+        echo -e "${RD}${BOLD}  ⚠ DNS NOT READY — web UI shell loads, but login/API will fail${CL}"
+        echo -e "  The browser must resolve BOTH names (checked above from host + CT):"
+        echo -e "    ${BOLD}${PUTER_DOMAIN}   ->  ${CT_IP}${CL}"
+        echo -e "    ${BOLD}*.${PUTER_DOMAIN}  ->  ${CT_IP}${CL}   (wildcard: api./site./app. subdomains)"
+        echo -e "  Create these A-records on your LAN DNS server, then verify ON THE CLIENT PC:"
+        echo -e "    nslookup ${PUTER_DOMAIN}      nslookup api.${PUTER_DOMAIN}"
+        echo -e "  Both must answer ${CT_IP} — and the client must actually USE that DNS server"
+        echo -e "  (check DHCP/DNS settings; e.g. FritzBox hands out itself by default)."
+        echo -e "  No wildcard-capable DNS? Fallback: PUTER_DOMAIN=<ct-ip-with-dashes>.nip.io (see README)."
+        echo ""
     fi
 }
 
@@ -442,6 +484,9 @@ else
     echo -e "  ${YW}⚠${CL} api.${PUTER_DOMAIN} not answering yet — set wildcard DNS *.${PUTER_DOMAIN} -> ${CT_IP}, then re-check${CL}"
 fi
 
+# Resolvability from host + CT (warning only — see check_dns)
+check_dns
+
 # ── First-boot admin password (Puter prints it once on first boot) ──────────
 ADMIN_PW_LINES=$(pct exec "$PUTER_CTID" -- bash -c \
     'grep -h -i "tmp_password\|admin.*password" /var/log/puter-install.log 2>/dev/null | head -n 3' 2>/dev/null || true)
@@ -467,8 +512,12 @@ msg_ok "CT description + tags set"
 echo ""
 echo -e "${GN}${BOLD}✔ ${APP} setup has been successfully initialized!${CL}"
 echo ""
-echo -e "  ${BGN}Web UI  :${CL} http://${CT_IP}:${PUTER_PORT}   (domain: ${PUTER_DOMAIN}${PUTER_PORT_SUFFIX:-})"
-echo -e "  ${BGN}DNS     :${CL} *.${PUTER_DOMAIN} -> ${CT_IP}  (wildcard, required for login/API)"
+echo -e "  ${BGN}Web UI  :${CL} http://${CT_IP}:${PUTER_PORT}   (domain: ${PUTER_DOMAIN})"
+if [[ "${DNS_OK:-0}" -eq 1 ]]; then
+    echo -e "  ${BGN}DNS     :${CL} *.${PUTER_DOMAIN} -> ${CT_IP}  ${GN}(resolving ✓)${CL}"
+else
+    echo -e "  ${BGN}DNS     :${CL} *.${PUTER_DOMAIN} -> ${CT_IP}  ${RD}(NOT resolving — fix DNS, see warning above!)${CL}"
+fi
 echo -e "  ${BGN}Login   :${CL} user 'admin' + first-boot temp password (install log)"
 echo -e "  ${BGN}Logs    :${CL} pct exec ${PUTER_CTID} -- journalctl -u puter -f"
 echo -e "  ${BGN}Update  :${CL} re-run this installer (update mode) — or in CT: cd /opt/puter && docker compose pull && docker compose up -d"

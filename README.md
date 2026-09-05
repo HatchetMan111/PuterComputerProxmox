@@ -29,7 +29,27 @@ puter.lan.        IN A   <CT-IP>     ; die CT-IP nach der Installation
 *.puter.lan.      IN A   <CT-IP>     ; Wildcard für api./site./app./…
 ```
 
-> Die CT-IP per DHCP beziehen und dann im DNS nachziehen — oder dem CT im Script per `PUTER_STATIC_IP` eine statische IP geben (siehe Variablen unten).
+> Tipp für stabile DNS-Einträge: Lege im DHCP-Server eine **Reservierung** für den CT an (z. B. FritzBox: Heimnetz → Netzwerk → „diesem Gerät immer dieselbe IP zuweisen") — dann bleibt die CT-IP dauerhaft gleich.
+
+> **FritzBox-Hinweis:** Die FritzBox kann **keine** Wildcard-Einträge. Entweder einen separaten LAN-DNS mit Wildcard-Support betreiben (Pi-hole, AdGuard Home, dnsmasq, BIND) und Clients/DHCP darauf zeigen lassen — oder den nip.io-Fallback unten nutzen.
+>
+> **Ganz wichtig:** Die Clients müssen den DNS-Server auch tatsächlich **nutzen**. Standardmäßig verteilt z. B. die FritzBox sich selbst per DHCP — Einträge auf einem anderen Server greifen dann ins Leere. **Auf dem Client-PC** (nicht auf dem Proxmox-Host!) prüfen:
+> ```
+> nslookup puter.lan
+> nslookup api.puter.lan
+> ```
+> Beide müssen die CT-IP antworten. Der Installer prüft das übrigens selbst (Host + CT) und warnt deutlich, wenn es nicht auflöst.
+
+#### Fallback ohne eigenes DNS: nip.io
+
+Öffentlicher Wildcard-DNS — `192.168.178.96.nip.io` löst (bei Internet-Zugang der Clients) automatisch auf `192.168.178.96` auf, ebenso `api.192.168.178.96.nip.io` und jede weitere Subdomain. Kein eigener DNS-Server nötig:
+
+```bash
+PUTER_DOMAIN=192.168.178.96.nip.io bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/PuterComputerProxmox/main/install/puter.sh)"
+```
+
+(CT-IP vorher ermitteln oder DHCP-Reservierung nutzen, damit sie stabil bleibt.)
+Hinweise: Nur die DNS-Auflösung läuft über einen öffentlichen Dienst — App-Daten bleiben im LAN. Router mit DNS-Rebind-Schutz (z. B. FritzBox) filtern solche Antworten ggf.; dann nip.io unter *Heimnetz → DNS-Rebind-Schutz → Ausnahmen* freigeben oder doch eigenes DNS nutzen.
 
 ---
 
