@@ -111,7 +111,7 @@ if [[ $EUID -ne 0 ]]; then
     msg_error "This script must run as root on the Proxmox host."
     exit 1
 fi
-for cmd in pct pvesh wget curl; do
+for cmd in pct pvesh qm pveam pvesm wget curl; do
     command -v "$cmd" >/dev/null 2>&1 \
         || { msg_error "Missing required command: '$cmd' — run this on the Proxmox host."; exit 1; }
 done
@@ -122,29 +122,42 @@ if ! pvesh get /storage --output json 2>/dev/null | grep -q "\"${PUTER_STORAGE}\
     exit 1
 fi
 
-# ── CT ID prompt (community-scripts behavior) ──────────────────────────────
+# ── Guest inventory helpers ─────────────────────────────────────────────────
+# Robust against the classic traps:
+#  * `pct status` fails for qemu VMIDs (wrong tool) — never use it for existence
+#  * `pct list` hides qemu guests — next-free-ID must scan cluster resources
+#  * pasted/typed IDs may carry whitespace/CR — always sanitize + validate
+cluster_vmids() {
+    pvesh get /cluster/resources --output json 2>/dev/null \
+        | grep -oE '"vmid": ?[0-9]+' | grep -oE '[0-9]+' || true
+}
+vmid_taken() {  # exit 0 = taken (lxc OR qemu), 1 = free
+    local id="$1"
+    cluster_vmids | grep -qx "$id"
+}
+guest_type() {  # prints: lxc | qemu | none
+    local id="$1"
+    if pct config "$id" &>/dev/null; then echo lxc; return 0; fi
+    if qm config "$id" &>/dev/null; then echo qemu; return 0; fi
+    echo none
+}
 next_free_ctid() {
-    local id=100
-    while pct list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$id"; do
+    local id=100 used
+    used=$(cluster_vmids)
+    while printf '%s\n' "$used" | grep -qx "$id"; do
         id=$((id + 1))
     done
     echo "$id"
 }
-if [[ -z "$PUTER_CTID" ]]; then
-    DEFAULT_ID=$(next_free_ctid)
-    read -r -p "$(echo -e "${YW}Enter CT ID [Press ENTER for ${DEFAULT_ID}]:${CL}") " INPUT_ID
-    PUTER_CTID="${INPUT_ID:-$DEFAULT_ID}"
-fi
-
-if pct status "$PUTER_CTID" &>/dev/null; then
-    msg_info "CT ${PUTER_CTID} exists — update mode (existing install is updated, not overwritten)"
-    UPDATE_MODE=1
-else
-    UPDATE_MODE=0
-fi
-
-# ── Domain requirement (wildcard DNS needed; see README) ────────────────────
-if [[ "$UPDATE_MODE" -eq 0 ]] && [[ -z "$PUTER_DOMAIN" ]]; then
+validate_ctid() {  # sanitize + validate; prints clean id, returns 1 if bad
+    local raw="$1" clean
+    clean=$(printf '%s' "$raw" | tr -d '[:space:]')
+    if ! [[ "$clean" =~ ^[0-9]+$ ]]; then return 1; fi
+    if ! (( 10#$clean >= 100 && 10#$clean <= 999999999 )); then return 1; fi
+    printf '%s' "$clean"
+}
+ask_domain() {
+    [[ -n "$PUTER_DOMAIN" ]] && return 0
     echo ""
     echo -e "${YW}Puter 26.x serves its backend API on the 'api.' subdomain${CL}"
     echo -e "${YW}of its domain (95+ routes are subdomain-gated). Plan:${CL}"
@@ -152,8 +165,79 @@ if [[ "$UPDATE_MODE" -eq 0 ]] && [[ -z "$PUTER_DOMAIN" ]]; then
     echo -e "  ${BOLD}2)${CL} create wildcard DNS      ${BOLD}*.puter.lan -> <CT-IP>${CL}  (on your LAN DNS)"
     echo -e "     (also: puter.lan itself; *.site.puter.lan is handled by the same wildcard)"
     echo ""
-    read -r -p "$(echo -e "${YW}Domain to serve Puter on [puter.lan]:${CL}") " INPUT_DOMAIN
-    PUTER_DOMAIN="${INPUT_DOMAIN:-puter.lan}"
+    local input=""
+    read -r -p "$(echo -e "${YW}Domain to serve Puter on [puter.lan]:${CL}") " input || true
+    PUTER_DOMAIN="${input:-puter.lan}"
+}
+ensure_running_and_detect() {
+    # For an existing LXC: start it if needed, verify pct exec works,
+    # set HAS_INSTALL (1 = previous Puter install found). Fatal on failure.
+    local state
+    state=$(pct status "$PUTER_CTID" 2>/dev/null | awk '{print $2}' || echo unknown)
+    if [[ "$state" != "running" ]]; then
+        msg_info "Starting existing CT ${PUTER_CTID} (state: ${state:-unknown})"
+        pct start "$PUTER_CTID"
+        msg_ok "CT started"
+    fi
+    if ! pct exec "$PUTER_CTID" -- true 2>/dev/null; then
+        msg_error "Cannot run commands in CT ${PUTER_CTID} (pct exec failed) — is it healthy?"
+        exit 1
+    fi
+    if pct exec "$PUTER_CTID" -- test -f /opt/puter/puter-selfhosted/docker-compose.yml 2>/dev/null; then
+        HAS_INSTALL=1
+    else
+        HAS_INSTALL=0
+    fi
+}
+
+# ── CT ID: prompt with validation, robust existence detection ───────────────
+if [[ -n "${PUTER_CTID:-}" ]]; then
+    if ! PUTER_CTID=$(validate_ctid "$PUTER_CTID"); then
+        msg_error "Invalid PUTER_CTID (must be numeric, 100-999999999)."
+        exit 1
+    fi
+else
+    DEFAULT_ID=$(next_free_ctid)
+    PUTER_CTID=""
+    for _ in 1 2 3; do
+        INPUT_ID=""
+        read -r -p "$(echo -e "${YW}Enter CT ID [Press ENTER for ${DEFAULT_ID}]:${CL}") " INPUT_ID || break
+        INPUT_ID="${INPUT_ID:-$DEFAULT_ID}"
+        if CLEAN_ID=$(validate_ctid "$INPUT_ID"); then
+            PUTER_CTID="$CLEAN_ID"
+            break
+        fi
+        msg_error "Invalid CT ID '${INPUT_ID}' — must be numeric (100-999999999). Try again."
+    done
+    [[ -n "${PUTER_CTID:-}" ]] || { msg_error "No valid CT ID entered."; exit 1; }
+fi
+
+# ── What lives at this VMID? (lxc / qemu / none) ────────────────────────────
+case "$(guest_type "$PUTER_CTID")" in
+    qemu)
+        msg_error "VMID ${PUTER_CTID} is a QEMU virtual machine, not an LXC container."
+        msg_error "This installer manages LXC only — pick another ID (next free: $(next_free_ctid))."
+        exit 1
+        ;;
+    lxc)
+        NEED_CREATE=0
+        ensure_running_and_detect
+        if [[ "$HAS_INSTALL" -eq 1 ]]; then
+            msg_info "CT ${PUTER_CTID} has an existing Puter install — update mode (data + secrets kept)"
+        else
+            msg_info "CT ${PUTER_CTID} exists but has no Puter install — fresh install into it"
+        fi
+        ;;
+    none)
+        NEED_CREATE=1
+        HAS_INSTALL=0
+        ;;
+esac
+UPDATE_MODE=$HAS_INSTALL
+
+# ── Domain (prompt only for fresh installs; update keeps configured domain) ──
+if [[ "$HAS_INSTALL" -eq 0 ]]; then
+    ask_domain
 fi
 if [[ "$UPDATE_MODE" -eq 1 ]]; then
     # Show the configured domain of the existing install (update keeps it)
@@ -167,43 +251,85 @@ if [[ "$UPDATE_MODE" -eq 1 ]]; then
     fi
 fi
 
-# ── Create the container ────────────────────────────────────────────────────
-if [[ "$UPDATE_MODE" -eq 0 ]]; then
-    msg_info "Creating LXC ${PUTER_CTID} (${PUTER_CTHOSTNAME}: ${PUTER_CORES} vCPU, ${PUTER_RAM} MiB RAM, ${PUTER_DISK} GB disk, Debian ${PUTER_VERSION_TEMPLATE}, storage: ${PUTER_STORAGE})"
+# ── Template resolution (local cache first, pveam download fallback) ───────
+resolve_template() {
+    # prints "store:vztmpl/file"; prefers 'local', scans any vztmpl storage
+    local pat="debian-${PUTER_VERSION_TEMPLATE}-standard" store fname
+    for store in local $(pvesm status --content vztmpl 2>/dev/null | awk 'NR>1{print $1}' | grep -vx local || true); do
+        fname=$(pveam list "$store" 2>/dev/null | grep -oE "${pat}[^ ]*\.tar\.zst" | sort -V | tail -n1 || true)
+        if [[ -n "$fname" ]]; then
+            printf '%s:vztmpl/%s' "$store" "$fname"
+            return 0
+        fi
+    done
+    return 1
+}
+template_store() {
+    # storage to download templates to: local if vztmpl-capable, else first such storage
+    local stores first
+    stores=$(pvesm status --content vztmpl 2>/dev/null | awk 'NR>1{print $1}' || true)
+    if printf '%s\n' "$stores" | grep -qx local; then echo local; return 0; fi
+    first=$(printf '%s\n' "$stores" | head -n1)
+    [[ -n "$first" ]] || return 1
+    echo "$first"
+}
+download_template() {
+    # downloads newest matching template into $1; prints volid
+    local store="$1" file
+    msg_info "Updating template index (pveam update ${store})"
+    pveam update "$store" >/dev/null 2>&1 || true
+    file=$(pveam available --section system 2>/dev/null \
+        | grep -oE "debian-${PUTER_VERSION_TEMPLATE}-standard[^ \"']*\.tar\.zst" \
+        | sort -V | tail -n1 || true)
+    [[ -n "$file" ]] || { msg_error "No Debian ${PUTER_VERSION_TEMPLATE} template in pveam index."; return 1; }
+    msg_info "Downloading template ${file} to '${store}'"
+    pveam download "$store" "$file"
+    printf '%s:vztmpl/%s' "$store" "$file"
+}
 
-    # Ensure the Debian template exists locally; download if missing
-    if ! pvesh get /storage/local/content --content vztmpl --output json 2>/dev/null \
-        | grep -q "${PUTER_OS}-${PUTER_VERSION_TEMPLATE}-standard"; then
-        msg_info "Downloading Debian ${PUTER_VERSION_TEMPLATE} LXC template via pveam"
-        pveam update local >/dev/null 2>&1 || true
-        AVAILABLE=$(pveam available -section system 2>/dev/null \
-            | awk -v os="${PUTER_OS}" -v ver="${PUTER_VERSION_TEMPLATE}" \
-                '$2 ~ "^"os"-"ver"-standard" {print $2; exit}')
-        [[ -n "$AVAILABLE" ]] || { msg_error "No Debian ${PUTER_VERSION_TEMPLATE} template found in pveam."; exit 1; }
-        pveam download local "$AVAILABLE"
-        TEMPLATE="local:vztmpl/${AVAILABLE}"
-    else
-        TEMPLATE=$(pvesh get /storage/local/content --content vztmpl --output json 2>/dev/null \
-            | grep -oE "local:vztmpl/${PUTER_OS}-${PUTER_VERSION_TEMPLATE}-standard[^\"]*" | head -n1)
+# ── Create the container (skipped when reusing an existing CT) ──────────────
+if [[ "$NEED_CREATE" -eq 1 ]]; then
+    msg_info "Resolving Debian ${PUTER_VERSION_TEMPLATE} LXC template"
+    if ! TEMPLATE=$(resolve_template); then
+        TS=$(template_store) || { msg_error "No storage with 'vztmpl' content found."; exit 1; }
+        TEMPLATE=$(download_template "$TS") || exit 1
     fi
-    [[ -n "$TEMPLATE" ]] || { msg_error "Could not resolve a Debian template volid."; exit 1; }
+    msg_ok "Template: ${TEMPLATE}"
 
-    pct create "$PUTER_CTID" "$TEMPLATE" \
-        --hostname "$PUTER_CTHOSTNAME" \
-        --cores "$PUTER_CORES" \
-        --memory "$PUTER_RAM" \
-        --swap 512 \
-        --rootfs "${PUTER_STORAGE}:${PUTER_DISK}" \
-        --net0 "name=eth0,bridge=${PUTER_BRIDGE},ip=dhcp,type=veth" \
-        --features nesting=1,keyctl=1 \
-        --unprivileged 1 \
-        --onboot 1 \
-        --start 0 >/dev/null
-    msg_ok "Created LXC ${PUTER_CTID}"
-
-    msg_info "Starting container"
-    pct start "$PUTER_CTID"
-    msg_ok "Container started"
+    msg_info "Creating LXC ${PUTER_CTID} (${PUTER_CTHOSTNAME}: ${PUTER_CORES} vCPU, ${PUTER_RAM} MiB RAM, ${PUTER_DISK} GB disk, storage: ${PUTER_STORAGE})"
+    if CREATE_OUT=$(pct create "$PUTER_CTID" "$TEMPLATE" \
+            --hostname "$PUTER_CTHOSTNAME" \
+            --cores "$PUTER_CORES" \
+            --memory "$PUTER_RAM" \
+            --swap 512 \
+            --rootfs "${PUTER_STORAGE}:${PUTER_DISK}" \
+            --net0 "name=eth0,bridge=${PUTER_BRIDGE},ip=dhcp,type=veth" \
+            --features nesting=1,keyctl=1 \
+            --unprivileged 1 \
+            --onboot 1 \
+            --start 0 2>&1); then
+        msg_ok "Created LXC ${PUTER_CTID}"
+        msg_info "Starting container"
+        pct start "$PUTER_CTID"
+        msg_ok "Container started"
+    elif echo "$CREATE_OUT" | grep -qi "already exists"; then
+        # Race (or stale inventory): the guest appeared meanwhile — continue
+        # idempotently instead of failing with the ERR trap.
+        msg_info "CT ${PUTER_CTID} already exists — continuing in place (idempotent)"
+        NEED_CREATE=0
+        if [[ "$(guest_type "$PUTER_CTID")" != "lxc" ]]; then
+            msg_error "VMID ${PUTER_CTID} is not an LXC container — aborting."
+            exit 1
+        fi
+        ensure_running_and_detect
+        UPDATE_MODE=$HAS_INSTALL
+        if [[ "$HAS_INSTALL" -eq 0 ]]; then
+            ask_domain
+        fi
+    else
+        echo "$CREATE_OUT" >&2
+        exit 1
+    fi
 fi
 
 # ── Wait for network (DHCP lease) ───────────────────────────────────────────

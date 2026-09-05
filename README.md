@@ -103,6 +103,8 @@ bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/PuterComp
 
 Installer **erneut ausführen** (gleicher CT): erkennt bestehende Installation und fährt `docker compose pull && docker compose up -d` (Update-Modus, idempotent). Konfiguration/Secrets/Daten bleiben erhalten.
 
+Robustheit: Die CT-ID wird gegen den **gesamten Cluster** geprüft (LXC + QEMU, via `pvesh`), Eingaben werden validiert, QEMU-IDs werden mit klarem Fehler abgelehnt, und ein existierender CT **ohne** Puter-Installation wird direkt für die Neuinstallation wiederverwendet. Eine `pct create`-Kollision („already exists") schaltet automatisch in den Update-Modus statt abzubrechen.
+
 Alternativ im CT manuell:
 
 ```bash
