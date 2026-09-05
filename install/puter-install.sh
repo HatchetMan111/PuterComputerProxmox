@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# -----------------------------------------------------------------------------
+# puter-install.sh — runs INSIDE the LXC container (pushed + executed by
+# install/puter.sh via pct exec). Community-scripts install/<app>-install.sh style.
+#
+# Steps:
+#   1. apt update + upgrade, base packages
+#   2. Docker Engine + compose plugin (get.docker.com)
+#   3. Docker log rotation (daemon.json) — BEFORE the stack starts
+#   4. Official Puter self-host installer (compose stack: puter, caddy,
+#      mariadb, valkey, dynamodb-local, rustfs) with PUTER_DOMAIN/PUTER_PORT
+#      — or update (compose pull + up -d) if already installed
+#   5. systemd unit puter.service (reboot-safe; docker restart policies)
+#   6. Self-verification: systemctl is-active, HTTP check, admin password
+#
+# Environment (set by the host script):
+#   PUTER_DOMAIN  — domain Puter serves on (wildcard DNS -> CT IP)
+#   PUTER_PORT    — HTTP port (default 80)
+#   PUTER_CTIP    — container IP (informational)
+#   UPDATE_MODE   — 1 = existing install, update only
+#
+# Debug: bash -x /tmp/puter-install.sh
+# -----------------------------------------------------------------------------
+
+set -euo pipefail
+
+PUTER_DOMAIN="${PUTER_DOMAIN:-puter.lan}"
+PUTER_PORT="${PUTER_PORT:-80}"
+PUTER_CTIP="${PUTER_CTIP:-}"
+UPDATE_MODE="${UPDATE_MODE:-0}"
+INSTALL_ROOT="/opt/puter"
+COMPOSE_DIR="${INSTALL_ROOT}/puter-selfhosted"
+
+# ── Colors + helpers (community-scripts style) ──────────────────────────────
+if [[ -t 1 ]] && [[ "${PUTER_NO_COLOR:-}" != "1" ]]; then
+    YW=$(printf '\033[1;33m'); GN=$(printf '\033[1;32m'); RD=$(printf '\033[1;31m')
+    BOLD=$(printf '\033[1m'); CL=$(printf '\033[0m')
+else
+    YW=""; GN=""; RD=""; BOLD=""; CL=""
+fi
+INFO="${YW}Info:${CL}"
+ERROR="${RD}ERROR:${CL}"
+
+msg_info()  { echo -e "${INFO} ${YW}$1${CL}"; }
+msg_ok()    { echo -e "  ${GN}✔${CL} ${GN}$1${CL}"; }
+msg_error() { echo -e "${ERROR} ${RD}$1${CL}" >&2; }
+
+# $STD: run quietly; on failure re-run showing the last 40 lines (debug chain)
+STD() { "$@" >/dev/null 2>&1 || { "$@" 2>&1 | tail -n 40 >&2; false; }; }
+
+on_error() {
+    local exit_code=$1 line=$2 cmd=$3
+    echo "" >&2
+    echo -e "${RD}══════════════════════════════════════════════════════${CL}" >&2
+    echo -e "${RD}  IN-CONTAINER INSTALL FAILED — full error chain${CL}" >&2
+    echo -e "${RD}══════════════════════════════════════════════════════${CL}" >&2
+    echo -e "  ✘ Failed command : ${BOLD}${cmd}${CL}" >&2
+    echo -e "  ✘ Exit code      : ${RD}${exit_code}${CL}" >&2
+    echo -e "  ✘ Script line    : ${line}" >&2
+    echo "" >&2
+    echo -e "${YW}── docker info (last 15 lines) ──${CL}" >&2
+    { docker info 2>&1 | tail -n 15 || true; } >&2
+    echo -e "${YW}── docker compose ps (in ${COMPOSE_DIR}) ──${CL}" >&2
+    { cd "$COMPOSE_DIR" 2>/dev/null && docker compose ps 2>&1 || true; } >&2
+    echo -e "${YW}── docker compose logs (last 40 lines) ──${CL}" >&2
+    { cd "$COMPOSE_DIR" 2>/dev/null && docker compose logs --tail=40 2>&1 || true; } >&2
+    echo -e "${YW}── journalctl -u puter (last 25 lines) ──${CL}" >&2
+    { journalctl -u puter -n 25 --no-pager 2>&1 || true; } >&2
+    echo -e "${RD}══════════════════════════════════════════════════════${CL}" >&2
+    echo -e "${YW}Debug re-run: bash -x /tmp/puter-install.sh${CL}" >&2
+}
+trap 'on_error $? $LINENO "${BASH_COMMAND}"' ERR
+
+# ── Preflight ────────────────────────────────────────────────────────────────
+[[ $EUID -eq 0 ]] || { msg_error "Run as root inside the CT."; exit 1; }
+msg_info "In-container install starting (domain=${PUTER_DOMAIN}, port=${PUTER_PORT}, ip=${PUTER_CTIP:-dhcp}, update-mode=${UPDATE_MODE})"
+export DEBIAN_FRONTEND=noninteractive
+
+# ── Step 1: OS + base packages ───────────────────────────────────────────────
+if ! command -v docker &>/dev/null; then
+    msg_info "Updating OS (apt update + upgrade)"
+    STD apt-get update
+    STD apt-get -y upgrade
+    msg_ok "OS updated"
+
+    msg_info "Installing base packages (curl, wget, ca-certificates, openssl, jq)"
+    STD apt-get install -y curl wget ca-certificates openssl gnupg jq
+    msg_ok "Base packages installed"
+else
+    msg_info "Docker already present — skipping OS/base package setup"
+fi
+
+# ── Step 2: Docker Engine + compose plugin ───────────────────────────────────
+if ! command -v docker &>/dev/null; then
+    msg_info "Installing Docker Engine + compose plugin (get.docker.com)"
+    curl -fsSL https://get.docker.com | STD sh
+    msg_ok "Docker installed: $(docker --version)"
+fi
+STD systemctl enable --now docker
+msg_ok "Docker service enabled + started"
+
+docker info >/dev/null 2>&1 || { msg_error "Docker daemon not reachable."; exit 1; }
+docker compose version >/dev/null 2>&1 || { msg_error "docker compose plugin missing."; exit 1; }
+
+# ── Step 3: docker log rotation (before the stack starts) ───────────────────
+if ! grep -q "max-size" /etc/docker/daemon.json 2>/dev/null; then
+    msg_info "Configuring docker log rotation (50 MB × 3 per container)"
+    mkdir -p /etc/docker
+    if [[ -f /etc/docker/daemon.json ]]; then
+        jq '. + {"log-driver":"json-file","log-opts":{"max-size":"50m","max-file":"3"}}' \
+            /etc/docker/daemon.json > /etc/docker/daemon.json.new \
+            && mv /etc/docker/daemon.json.new /etc/docker/daemon.json
+    else
+        printf '{\n  "log-driver": "json-file",\n  "log-opts": { "max-size": "50m", "max-file": "3" }\n}\n' \
+            > /etc/docker/daemon.json
+    fi
+    STD systemctl restart docker
+    sleep 3
+    msg_ok "Docker log rotation configured"
+else
+    msg_ok "Docker log rotation already configured"
+fi
+
+# ── Step 4: Puter stack — official installer or update ──────────────────────
+mkdir -p "$INSTALL_ROOT"
+
+if [[ -f "${COMPOSE_DIR}/docker-compose.yml" && -f "${COMPOSE_DIR}/.env" ]]; then
+    msg_info "Existing Puter installation found in ${COMPOSE_DIR} — updating"
+    cd "$COMPOSE_DIR"
+    # Re-apply the data-dir permissions the official installer sets (0777 for
+    # non-root container UIDs: mysql, dynamodb uid 1000, rustfs uid 10001).
+    # CRITICAL: puter/config must stay world-readable (0777 dir + 0666
+    # config.json) — the puter container runs as uid 1000 (node) and falls
+    # back to sqlite defaults with an EACCES crash-loop if it cannot read
+    # its own config.json (e.g. after a stack copy/restore).
+    chmod 0777 puter/data/valkey puter/data/mariadb puter/data/dynamo \
+        puter/data/s3 puter/data/puter puter/data/caddy 2>/dev/null || true
+    chmod 0777 puter/config 2>/dev/null || true
+    chmod 0666 puter/config/config.json 2>/dev/null || true
+    STD docker compose pull
+    STD docker compose up -d --remove-orphans
+    msg_ok "Puter stack updated (compose pull + up)"
+else
+    msg_info "Running official Puter self-host installer"
+    msg_info "  PUTER_DIR=${COMPOSE_DIR}  PUTER_DOMAIN=${PUTER_DOMAIN}  PUTER_PORT=${PUTER_PORT}"
+    # Official installer: downloads docker-compose.yml + caddy/Caddyfile,
+    # generates secrets, writes .env + puter/config/config.json (idempotent:
+    # keeps existing secrets), runs docker compose up -d.
+    if ! curl -fsSL https://raw.githubusercontent.com/HeyPuter/puter/main/install.sh \
+        | env PUTER_DIR="$COMPOSE_DIR" \
+              PUTER_DOMAIN="$PUTER_DOMAIN" \
+              PUTER_PORT="$PUTER_PORT" \
+              PUTER_ENV=prod \
+              PUTER_TRUST_PROXY=1 \
+              sh; then
+        msg_error "Official Puter installer failed — full output above"
+        exit 1
+    fi
+    msg_ok "Puter stack installed via official installer"
+fi
+
+cd "$COMPOSE_DIR"
+[[ -f docker-compose.yml ]] || { msg_error "docker-compose.yml missing in ${COMPOSE_DIR}."; exit 1; }
+
+# ── Step 5: systemd unit (reboot-safe, requirement 6) ───────────────────────
+msg_info "Installing systemd unit puter.service"
+if [[ -f /tmp/puter.service ]]; then
+    cp /tmp/puter.service /etc/systemd/system/puter.service
+else
+    msg_error "/tmp/puter.service missing (host script did not push it)"
+    exit 1
+fi
+# Bake the compose dir into the unit via drop-in (unit file stays generic)
+mkdir -p /etc/systemd/system/puter.service.d
+cat > /etc/systemd/system/puter.service.d/compose-dir.conf <<EOF
+[Service]
+WorkingDirectory=${COMPOSE_DIR}
+EOF
+systemctl daemon-reload
+STD systemctl enable puter
+msg_ok "systemd unit installed + enabled (After=network-online.target + docker)"
+
+msg_info "(Re)starting puter.service"
+STD systemctl restart puter
+msg_ok "puter.service active"
+
+# ── Step 6a: wait for the puter container ──────────────────────────────────
+msg_info "Waiting for the 'puter' container (first boot ~60–120 s: MariaDB init + migrations)"
+DEADLINE=$((SECONDS + 300))
+until docker compose ps --status running --services 2>/dev/null | grep -qx 'puter'; do
+    if (( SECONDS > DEADLINE )); then
+        msg_error "'puter' container not running after 300 s — full state:"
+        docker compose ps >&2 || true
+        docker compose logs --tail=60 puter >&2 || true
+        exit 1
+    fi
+    sleep 5
+done
+msg_ok "Puter container is running"
+
+# ── Step 6b: wait for the web UI (HTTP) ──────────────────────────────────────
+msg_info "Waiting for web UI on localhost:${PUTER_PORT} (up to 180 s)"
+HTTP_CODE=000
+DEADLINE=$((SECONDS + 180))
+while (( SECONDS < DEADLINE )); do
+    HTTP_CODE=$(curl -fsS -m 10 -o /dev/null -w '%{http_code}' \
+        "http://localhost:${PUTER_PORT}/" 2>/dev/null || echo 000)
+    case "$HTTP_CODE" in 200|301|302) break ;; esac
+    sleep 5
+done
+case "$HTTP_CODE" in
+    200|301|302) msg_ok "Web UI answers on http://localhost:${PUTER_PORT}/ (HTTP ${HTTP_CODE})" ;;
+    *)
+        msg_error "Web UI did not answer within 180 s (last HTTP code: ${HTTP_CODE})"
+        docker compose ps >&2 || true
+        docker compose logs --tail=60 >&2 || true
+        exit 1
+        ;;
+esac
+
+# ── Step 6c: first-boot admin password (printed once by puter) ───────────────
+# Emphasized output line; the host script greps it from /var/log/puter-install.log.
+if [[ "$UPDATE_MODE" -eq 0 ]]; then
+    sleep 5
+    ADMIN_LINE=$(docker compose logs puter 2>/dev/null | grep -E "password for admin|tmp_password" | tail -n 1 || true)
+    if [[ -n "$ADMIN_LINE" ]]; then
+        echo "ADMIN_PASSWORD_LINE: ${ADMIN_LINE}"
+        msg_ok "First-boot admin password extracted (see ADMIN_PASSWORD_LINE above)"
+    else
+        echo -e "  ${YW}⚠ admin password line not found yet — retrieve with:${CL}"
+        echo -e "    cd ${COMPOSE_DIR} && docker compose logs puter | grep -E 'password for admin|tmp_password'"
+    fi
+fi
+
+# ── Step 6d: firewall (usually inactive in LXC — documented no-op) ──────────
+if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+    STD ufw allow "${PUTER_PORT}/tcp"
+    msg_ok "ufw: port ${PUTER_PORT}/tcp allowed"
+else
+    msg_ok "No active firewall (ufw) — port ${PUTER_PORT} is open"
+fi
+
+msg_info "In-container install completed successfully"
+exit 0

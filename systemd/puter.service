@@ -1,0 +1,32 @@
+[Unit]
+# puter.service — brings up the Puter docker-compose stack on boot.
+# Pushed into the LXC by install/puter.sh; the compose directory is baked in
+# via the drop-in /etc/systemd/system/puter.service.d/compose-dir.conf
+# (WorkingDirectory=<compose dir>), so this unit file stays generic.
+#
+# Note on Restart=always: the compose services themselves use
+# `restart: unless-stopped` (docker-managed), which survives crashes AND
+# reboots. A Type=oneshot unit cannot use Restart=always (systemd forbids it
+# for oneshot), so crash-resilience lives in the docker policies + this unit
+# guarantees the stack is up after every boot.
+
+Description=Puter self-hosted stack (docker compose)
+Documentation=https://github.com/HeyPuter/puter
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# WorkingDirectory is set via drop-in (compose-dir.conf) by the installer:
+#   [Service]
+#   WorkingDirectory=/opt/puter/puter-selfhosted
+ExecStartPre=/usr/bin/docker compose pull --quiet
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=600
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
