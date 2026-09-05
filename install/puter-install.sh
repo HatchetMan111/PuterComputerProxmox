@@ -197,6 +197,10 @@ else
     fi
     rm -f "$OFFICIAL_LOG"
     msg_ok "Puter stack installed via official installer"
+    # NOTE: the official installer cd's in its own subshell — our cwd is still
+    # wherever pct exec started us (usually /). cd explicitly, otherwise
+    # docker compose finds no config file ("no configuration file provided").
+    cd "$COMPOSE_DIR"
     # Re-assert desired state through our own wrapper (idempotent no-op).
     compose_q up -d --remove-orphans || exit 1
 fi

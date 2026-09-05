@@ -62,6 +62,13 @@ ERROR="${RD}ERROR:${CL}"
 # ── Central error handler: full error chain ─────────────────────────────────
 on_error() {
     local exit_code=$1 line=$2 cmd=$3
+    # Best-effort cleanup of the temp push dir (unset if we failed very early).
+    # NOTE: this must happen HERE (after capturing $1/$2/$3), never as a
+    # separate command inside the trap string — anything running before
+    # on_error would clobber $? and the report would show exit code 0.
+    if [[ -n "${PUSH_DIR:-}" && -d "$PUSH_DIR" ]]; then
+        rm -rf "$PUSH_DIR" 2>/dev/null || true
+    fi
     echo "" >&2
     echo -e "${RD}════════════════════════════════════════════════════════════${CL}" >&2
     echo -e "${RD}  INSTALLATION FAILED — full error chain${CL}" >&2
@@ -370,9 +377,8 @@ msg_ok "Container IP: ${CT_IP}"
 # ── Fetch and push container-side installer + systemd unit (GitHub-first) ──
 msg_info "Fetching puter-install.sh + puter.service from repo"
 PUSH_DIR=$(mktemp -d)
-cleanup_push_dir() { rm -rf "$PUSH_DIR"; }
-trap 'cleanup_push_dir; on_error $? $LINENO "${BASH_COMMAND}"' ERR
-
+# NOTE: PUSH_DIR cleanup happens inside on_error (trap at top of script) —
+# never prepend commands to the trap string, they would clobber $?.
 wget -q -O "${PUSH_DIR}/puter-install.sh" "${PUTER_REPO_RAW}/install/puter-install.sh" \
     || { msg_error "Could not fetch ${PUTER_REPO_RAW}/install/puter-install.sh"; exit 1; }
 wget -q -O "${PUSH_DIR}/puter.service" "${PUTER_REPO_RAW}/systemd/puter.service" \
