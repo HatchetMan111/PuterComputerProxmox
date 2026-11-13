@@ -177,12 +177,16 @@ patch_config_ipmode() {
 }
 reset_config_standard() {
     # Undo ONLY our IP-Mode keys (leave user customizations alone).
+    # Also restores .domain: an IP-Mode install stores the bare CT IP there,
+    # which would leave Puter subdomain-gated on api.<IP> after the downgrade
+    # (stock config writes "domain": "<PUTER_DOMAIN>" + s3 endpoint http://s3.<domain>).
     local cfg="puter/config/config.json" cur_api cur_s3
     cur_api=$(jq -r '.api_base_url // empty' "$cfg" 2>/dev/null || true)
     cur_s3=$(jq -r '.s3.s3Config.publicEndpoint // empty' "$cfg" 2>/dev/null || true)
     if [[ "$cur_api" =~ :${PUTER_API_PORT}$ ]] || [[ "$cur_s3" =~ :${PUTER_S3_PORT}$ ]]; then
-        jq --arg s3 "http://s3.${PUTER_DOMAIN}" \
-            'del(.api_base_url) | .s3.s3Config.publicEndpoint = $s3' \
+        jq --arg domain "$PUTER_DOMAIN" \
+           --arg s3 "http://s3.${PUTER_DOMAIN}" \
+            'del(.api_base_url) | .domain = $domain | .s3.s3Config.publicEndpoint = $s3' \
             "$cfg" > "${cfg}.new" \
             && mv "${cfg}.new" "$cfg"
         chmod 0666 "$cfg" 2>/dev/null || true
@@ -255,7 +259,12 @@ fi
 # ── Step 2: Docker Engine + compose plugin ───────────────────────────────────
 if ! command -v docker &>/dev/null; then
     msg_info "Installing Docker Engine + compose plugin (get.docker.com)"
-    curl -fsSL https://get.docker.com | STD sh
+    # Download to a file first: STD's on-failure re-run would otherwise read
+    # an already-consumed stdin (empty) and fail with a misleading error.
+    GET_DOCKER_SH=$(mktemp /tmp/get-docker-XXXXXX.sh)
+    curl -fsSL https://get.docker.com -o "$GET_DOCKER_SH"
+    STD sh "$GET_DOCKER_SH"
+    rm -f "$GET_DOCKER_SH"
     msg_ok "Docker installed: $(docker --version)"
 fi
 STD systemctl enable --now docker
@@ -263,6 +272,15 @@ msg_ok "Docker service enabled + started"
 
 docker info >/dev/null 2>&1 || { msg_error "Docker daemon not reachable."; exit 1; }
 docker compose version >/dev/null 2>&1 || { msg_error "docker compose plugin missing."; exit 1; }
+
+# jq is required for config.json / daemon.json edits — also in update-only
+# runs, where Step 1 (base packages) is skipped when Docker is already present.
+if ! command -v jq >/dev/null 2>&1; then
+    msg_info "Installing jq (needed for config edits)"
+    STD apt-get update
+    STD apt-get install -y jq
+    msg_ok "jq installed"
+fi
 
 # ── Step 3: docker log rotation (before the stack starts) ───────────────────
 if ! grep -q "max-size" /etc/docker/daemon.json 2>/dev/null; then
@@ -364,8 +382,12 @@ systemctl daemon-reload
 STD systemctl enable puter
 msg_ok "systemd unit installed + enabled (After=network-online.target + docker)"
 
-msg_info "(Re)starting puter.service"
-STD systemctl restart puter
+msg_info "Ensuring puter.service is started (idempotent — no restart churn on updates)"
+# NOTE: start, not restart — systemd restart on this oneshot unit runs
+# ExecStop (= docker compose down!) first, tearing the whole stack down and
+# recreating it on every installer re-run. 'start' is a no-op when already
+# active(exited) and still brings it up on fresh installs / failed units.
+STD systemctl start puter
 msg_ok "puter.service active"
 
 # ── Step 6a: wait for the puter container ──────────────────────────────────

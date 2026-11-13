@@ -63,7 +63,7 @@ Erreichbar danach: Desktop/GUI `http://<CT-IP>` (:80), API `http://<CT-IP>:8080`
 
 Grenzen (technisch bedingt, kein Bug): User-Site-/App-Hosting (`<name>.site.<domain>`, dynamische Subdomains) geht ohne DNS nicht — dafür braucht es Wildcard-DNS oder nip.io. Alles andere (Desktop, Dateien, Store-Apps, Freigaben, KI-Provider) läuft.
 
-Technisch: `docker-compose.override.yml` (Caddy-Ports, updatefest) + generierte `caddy/Caddyfile` (Host-Rewrite, Backup als `Caddyfile.stock`) + `api_base_url`/`publicEndpoint`/`domain` in `config.json`. Zurück auf DNS-Modus: Installer ohne `PUTER_IP_MODE` erneut ausführen (räumt Override/Caddyfile/Keys sauber auf).
+Technisch: `docker-compose.override.yml` (Caddy-Ports, updatefest) + generierte `caddy/Caddyfile` (Host-Rewrite, Backup als `Caddyfile.stock`) + `api_base_url`/`publicEndpoint`/`domain` in `config.json`. Zurück auf DNS-Modus: Installer ohne `PUTER_IP_MODE` erneut ausführen — der Installer erkennt die IP-„Domain" in der Config, fragt ggf. nach der echten Domain und restauriert `domain` + S3-Endpoint + Caddyfile sauber.
 
 ---
 

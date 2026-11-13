@@ -93,7 +93,7 @@ on_error() {
         echo "" >&2
         echo -e "${YW}── Last 40 lines: docker compose logs (in CT) ──${CL}" >&2
         pct exec "$PUTER_CTID" -- bash -c \
-            'cd /opt/puter 2>/dev/null && docker compose logs --tail=40 2>&1 | tail -n 45' >&2 2>/dev/null || true
+            'cd /opt/puter/puter-selfhosted 2>/dev/null && docker compose logs --tail=40 2>&1 | tail -n 45' >&2 2>/dev/null || true
         echo "" >&2
         echo -e "${YW}── systemctl status puter (in CT) ──${CL}" >&2
         pct exec "$PUTER_CTID" -- bash -c \
@@ -279,7 +279,10 @@ else
     PUTER_CTID=""
     for _ in 1 2 3; do
         INPUT_ID=""
-        read -r -p "$(echo -e "${YW}Enter CT ID [Press ENTER for ${DEFAULT_ID}]:${CL}") " INPUT_ID || break
+        if ! read -r -p "$(echo -e "${YW}Enter CT ID [Press ENTER for ${DEFAULT_ID}]:${CL}") " INPUT_ID; then
+            # EOF (non-interactive run) → accept the default instead of failing
+            INPUT_ID="$DEFAULT_ID"
+        fi
         INPUT_ID="${INPUT_ID:-$DEFAULT_ID}"
         if CLEAN_ID=$(validate_ctid "$INPUT_ID"); then
             PUTER_CTID="$CLEAN_ID"
@@ -318,14 +321,22 @@ if [[ "$HAS_INSTALL" -eq 0 && "$PUTER_IP_MODE" != "1" ]]; then
     ask_domain
 fi
 if [[ "$UPDATE_MODE" -eq 1 ]]; then
-    # Show the configured domain of the existing install (update keeps it)
+    # Show the configured domain of the existing install (update keeps it).
+    # NOTE: an IP-Mode install stores the bare CT IP as "domain" in config.json
+    # — never treat that IP as the DNS domain of a DNS-mode run, or the
+    # IP-Mode -> DNS downgrade would keep serving on the bare IP.
     CONFIGURED_DOMAIN=$(pct exec "$PUTER_CTID" -- bash -c \
         "grep -o '\"domain\": \"[^\"]*\"' /opt/puter/puter-selfhosted/puter/config/config.json 2>/dev/null | head -n1 | cut -d'\"' -f4" 2>/dev/null || true)
-    if [[ -n "$CONFIGURED_DOMAIN" ]]; then
+    if [[ -n "$CONFIGURED_DOMAIN" && ! "$CONFIGURED_DOMAIN" =~ ^[0-9.]+$ ]]; then
         if [[ -n "$PUTER_DOMAIN" && "$PUTER_DOMAIN" != "$CONFIGURED_DOMAIN" ]]; then
             msg_info "Note: existing install serves domain '${CONFIGURED_DOMAIN}'; keeping it (PUTER_DOMAIN='${PUTER_DOMAIN}' ignored in update mode)"
         fi
         PUTER_DOMAIN="$CONFIGURED_DOMAIN"
+    elif [[ -z "$PUTER_DOMAIN" && "$PUTER_IP_MODE" != "1" ]]; then
+        # config.json still carries an IP-Mode domain (or none) — a real domain
+        # is required for the DNS-mode downgrade path.
+        msg_info "Existing install has no DNS domain configured (IP-Mode or fresh) — domain needed"
+        ask_domain
     fi
 fi
 
@@ -361,7 +372,9 @@ download_template() {
         | sort -V | tail -n1 || true)
     [[ -n "$file" ]] || { msg_error "No Debian ${PUTER_VERSION_TEMPLATE} template in pveam index."; return 1; }
     msg_info "Downloading template ${file} to '${store}'"
-    pveam download "$store" "$file"
+    # stdout -> /dev/null: this function's stdout is CAPTURED as the volid
+    # (TEMPLATE=$(download_template …)); pveam progress stays visible on stderr.
+    pveam download "$store" "$file" >/dev/null
     printf '%s:vztmpl/%s' "$store" "$file"
 }
 
@@ -415,7 +428,7 @@ msg_info "Waiting for container IP (DHCP)"
 CT_IP=""
 for _ in $(seq 1 60); do
     CT_IP=$(pct exec "$PUTER_CTID" -- bash -c \
-        "ip -4 addr show eth0 2>/dev/null | grep -oE 'inet [0-9.]+' | awk '{print \$2}'" 2>/dev/null || true)
+        "ip -4 addr show eth0 2>/dev/null | grep -oE 'inet [0-9.]+' | awk '{print \$2}' | head -n1" 2>/dev/null || true)
     [[ -n "$CT_IP" ]] && break
     sleep 2
 done
@@ -577,7 +590,7 @@ else
 fi
 echo -e "  ${BGN}Login   :${CL} user 'admin' + first-boot temp password (install log)"
 echo -e "  ${BGN}Logs    :${CL} pct exec ${PUTER_CTID} -- journalctl -u puter -f"
-echo -e "  ${BGN}Update  :${CL} re-run this installer (update mode) — or in CT: cd /opt/puter && docker compose pull && docker compose up -d"
+echo -e "  ${BGN}Update  :${CL} re-run this installer (update mode) — or in CT: cd /opt/puter/puter-selfhosted && docker compose pull && docker compose up -d"
 echo -e "  ${BGN}Uninstall:${CL} pct stop ${PUTER_CTID} && pct destroy ${PUTER_CTID} --purge"
 echo ""
 exit 0
