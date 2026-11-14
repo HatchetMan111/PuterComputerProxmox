@@ -108,7 +108,9 @@ Info: Verifying web UI from the Proxmox host: http://192.168.178.50:80/
 
   Web UI  : http://192.168.178.50   (domain: puter.lan)
   DNS     : *.puter.lan -> 192.168.178.50  (wildcard, required for login/API)
-  Login   : user 'admin' + first-boot temp password (install log)
+  Login   : user 'admin' + temp password: 11c5e58c6b4b0453114ab89469180767
+              (the login field takes the username — no email needed, self-hosted sends no confirmation mails)
+              (change the password after first login — the temp password stays valid until then)
   Logs    : pct exec 103 -- journalctl -u puter -f
   Update  : re-run this installer (update mode)
   Uninstall: pct stop 103 && pct destroy 103 --purge

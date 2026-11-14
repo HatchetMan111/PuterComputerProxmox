@@ -546,14 +546,17 @@ else
     msg_ok "IP-Mode S3 reachable from host (HTTP 403)"
 fi
 
-# ── First-boot admin password (Puter prints it once on first boot) ──────────
-ADMIN_PW_LINES=$(pct exec "$PUTER_CTID" -- bash -c \
-    'grep -h -i "tmp_password\|admin.*password" /var/log/puter-install.log 2>/dev/null | head -n 3' 2>/dev/null || true)
-if [[ -n "$ADMIN_PW_LINES" ]]; then
-    echo ""
-    echo -e "${GN}  First-boot admin credentials (Puter prints these ONCE):${CL}"
-    echo -e "${BOLD}${ADMIN_PW_LINES}${CL}"
-    echo -e "  ${YW}Log in as 'admin' and change the password immediately.${CL}"
+# ── Admin credentials for the finish block ──────────────────────────────────
+# The puter container prints the temp admin password on EVERY boot until it is
+# changed (official self-hosting doc) — grab it live from the container logs so
+# it lands right in the final summary. Fresh installs only: in update mode the
+# password may already have been changed, and printing the stale temp password
+# would be misleading.
+ADMIN_PW=""
+if [[ "$UPDATE_MODE" -eq 0 ]]; then
+    ADMIN_PW=$(pct exec "$PUTER_CTID" -- bash -c \
+        'cd /opt/puter/puter-selfhosted 2>/dev/null && docker compose logs puter 2>/dev/null | sed -n "s/.*password for admin is: //p" | tail -n1' \
+        2>/dev/null || true)
 fi
 
 # ── CT description + tags (community-scripts style) ────────────────────────
@@ -589,7 +592,14 @@ else
         echo -e "  ${BGN}DNS     :${CL} *.${PUTER_DOMAIN} -> ${CT_IP}  ${RD}(NOT resolving — fix DNS, see warning above!)${CL}"
     fi
 fi
-echo -e "  ${BGN}Login   :${CL} user 'admin' + first-boot temp password (install log)"
+if [[ -n "$ADMIN_PW" ]]; then
+    echo -e "  ${BGN}Login   :${CL} user 'admin' + temp password: ${BOLD}${ADMIN_PW}${CL}"
+else
+    echo -e "  ${BGN}Login   :${CL} user 'admin' + first-boot temp password"
+    echo -e "              (if unchanged, get it: pct exec ${PUTER_CTID} -- bash -c 'cd /opt/puter/puter-selfhosted && docker compose logs puter | grep \"password for admin\" | tail -n1')"
+fi
+echo -e "              (the login field takes the username — no email needed, self-hosted sends no confirmation mails)"
+echo -e "              (change the password after first login — the temp password stays valid until then)"
 echo -e "  ${BGN}Logs    :${CL} pct exec ${PUTER_CTID} -- journalctl -u puter -f"
 echo -e "  ${BGN}Update  :${CL} re-run this installer (update mode) — or in CT: cd /opt/puter/puter-selfhosted && docker compose pull && docker compose up -d"
 echo -e "  ${BGN}Uninstall:${CL} pct stop ${PUTER_CTID} && pct destroy ${PUTER_CTID} --purge"
