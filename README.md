@@ -204,6 +204,27 @@ Zusätzlich verifiziert im Testlauf:
 - `POST /readdir` mit `Host: api.<domain>` → Dateilisting (Subdomain-Routing aktiv)
 - `POST /readdir` mit Root-Host → `not_found` (Beweis, dass api-Subdomain zwingend ist)
 
+## Bekannte Upstream-Lücke: „Apps hinzufügen" → „Something went wrong"
+
+Der Desktop-Dialog **„Apps hinzufügen"** öffnet die Einträge *„Find an app"* (App Center) und *„Create an app with AI"* (Builder) **per App-Namen** (`app-center` / `builder`). Puters Postgres-Migrationen seeden `app-center` — der **MySQL/MariaDB-Migrationspfad** (den der Self-Host-Stack nutzt) jedoch **nicht**. Ergebnis ohne Gegenmaßnahme: Klick auf diese Optionen → App-Lookup 404 → „Something went wrong".
+
+Der Installer seedet beide Apps deshalb selbst (Step 6b3, `INSERT IGNORE` → idempotent):
+
+| App | index_url | Hinweis |
+|---|---|---|
+| `app-center` | `https://app-center.puter.com` | offizielle, von Puter gehostete Store-Seite |
+| `builder` | `https://builder.puter.com` | offizieller KI-App-Builder |
+
+Beide Seiten sind externe, von puter.com gehostete Apps — der Browser braucht also Internet-Zugang (die App-Daten selbst bleiben auf deiner Instanz). Wichtig: Nach dem Installer-Re-Run die Desktop-Seite einmal neu laden (Strg+F5), damit die App-Liste neu gezogen wird.
+
+Manuell prüfen/nachziehen (im CT):
+
+```bash
+cd /opt/puter/puter-selfhosted
+docker compose exec -T mariadb sh -c 'exec mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"' \
+  -e "SELECT name, index_url FROM apps WHERE name IN ('app-center','builder');"
+```
+
 ## Debugging
 
 - **Vollständige Fehlerkette**: beide Scripts haben einen `ERR`-Trap, der bei jedem Fehler **Exit-Code, fehlgeschlagenen Befehl, Zeile + CT-Install-Log, docker-compose-Logs und `systemctl status`** ausgibt — nie nur die letzte Zeile.

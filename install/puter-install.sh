@@ -11,7 +11,9 @@
 #      mariadb, valkey, dynamodb-local, rustfs) with PUTER_DOMAIN/PUTER_PORT
 #      — or update (compose pull + up -d) if already installed
 #   5. systemd unit puter.service (reboot-safe; docker restart policies)
-#   6. Self-verification: systemctl is-active, HTTP check, admin password
+#   6. Self-verification: systemctl is-active, HTTP check, admin password;
+#      seeds app-center + builder apps (missing in the MySQL migration set —
+#      the GUI's "Add app" dialog opens them by name)
 #
 # Environment (set by the host script):
 #   PUTER_DOMAIN  — domain Puter serves on (wildcard DNS -> CT IP)
@@ -467,6 +469,24 @@ if [[ "$PUTER_IP_MODE" == "1" ]]; then
         exit 1
     fi
     msg_ok "IP-Mode S3 answers on http://localhost:${PUTER_S3_PORT}/ (HTTP 403)"
+fi
+
+# ── Step 6b3: seed GUI-required apps missing from the MySQL seed set ─────────
+# The desktop's "Add app" modal opens the apps 'app-center' ("Find an app") and
+# 'builder' ("Create an app with AI") BY NAME. Puter's Postgres migrations seed
+# 'app-center', but the MySQL/MariaDB set (this stack) does NOT — clicking those
+# options then only yields "Something went wrong". Seed both rows, pointing at
+# the upstream-hosted pages (godmode=0: no elevated perms for an external page;
+# INSERT IGNORE = idempotent on re-runs).
+msg_info "Seeding app-center + builder apps (missing in the MySQL seed set)"
+SEED_SQL="INSERT IGNORE INTO apps (uid, owner_user_id, icon, name, title, description, index_url, godmode, maximize_on_start, background, approved_for_listing, approved_for_opening_items, approved_for_incentive_program, tags, timestamp) VALUES
+('app-a2ae72a4-1ba3-4a29-b5c0-6de1be5cf178', 1, NULL, 'app-center', 'App Center', 'Discover apps for Puter', 'https://app-center.puter.com', 0, 1, 0, 1, 1, 0, NULL, '2020-01-01 00:00:00'),
+('app-9f0b7c1d-2e3a-4f5b-8c6d-1a2b3c4d5e6f', 1, NULL, 'builder', 'Builder', 'Create an app with AI', 'https://builder.puter.com', 0, 1, 0, 1, 1, 0, NULL, '2020-01-01 00:00:00');"
+if docker compose exec -T mariadb sh -c 'exec mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"' \
+    <<< "$SEED_SQL" >/dev/null 2>&1; then
+    msg_ok "app-center + builder seeded ('Find an app' / 'Create with AI' open now)"
+else
+    echo -e "  ${YW}⚠ app seed skipped (database not reachable?) — 'Find an app' may fail until the installer re-runs${CL}"
 fi
 
 # ── Step 6c: first-boot admin password (printed once by puter) ───────────────
