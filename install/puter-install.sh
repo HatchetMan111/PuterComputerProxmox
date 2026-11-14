@@ -219,21 +219,33 @@ EOF
 }
 remove_ip_mode() {
     # Clean downgrade path back to standard (DNS) mode.
+    # Sets IPMODE_CHANGED=1 when anything was touched (caller recreates caddy
+    # + puter so the restored files are actually re-read).
     cd "$COMPOSE_DIR"
     local changed=0
     if [[ -f docker-compose.override.yml ]]; then rm -f docker-compose.override.yml; changed=1; fi
-    if [[ -f caddy/Caddyfile.stock ]]; then cp caddy/Caddyfile.stock caddy/Caddyfile; changed=1; fi
-    local before_api before_s3
+    # Restore the stock Caddyfile ONLY if the current one is actually ours
+    # (marker) or missing — .stock stays on disk after the first downgrade,
+    # and re-copying it on every DNS re-run would flag a phantom change.
+    if [[ -f caddy/Caddyfile.stock ]] \
+        && { [[ ! -f caddy/Caddyfile ]] || grep -q "IP-Mode Caddyfile" caddy/Caddyfile 2>/dev/null; }; then
+        cp caddy/Caddyfile.stock caddy/Caddyfile
+        changed=1
+    fi
+    local before_api before_s3 before_domain
     before_api=$(jq -r '.api_base_url // empty' puter/config/config.json 2>/dev/null || true)
     before_s3=$(jq -r '.s3.s3Config.publicEndpoint // empty' puter/config/config.json 2>/dev/null || true)
+    before_domain=$(jq -r '.domain // empty' puter/config/config.json 2>/dev/null || true)
     reset_config_standard
-    local after_api after_s3
+    local after_api after_s3 after_domain
     after_api=$(jq -r '.api_base_url // empty' puter/config/config.json 2>/dev/null || true)
     after_s3=$(jq -r '.s3.s3Config.publicEndpoint // empty' puter/config/config.json 2>/dev/null || true)
-    [[ "$before_api" != "$after_api" || "$before_s3" != "$after_s3" ]] && changed=1
+    after_domain=$(jq -r '.domain // empty' puter/config/config.json 2>/dev/null || true)
+    [[ "$before_api" != "$after_api" || "$before_s3" != "$after_s3" || "$before_domain" != "$after_domain" ]] && changed=1
     if [[ "$changed" -eq 1 ]]; then
         msg_info "Standard (DNS) mode restored — IP-Mode artifacts removed"
     fi
+    IPMODE_CHANGED=$changed
     return 0
 }
 
@@ -358,10 +370,20 @@ cd "$COMPOSE_DIR"
 [[ -f docker-compose.yml ]] || { msg_error "docker-compose.yml missing in ${COMPOSE_DIR}."; exit 1; }
 
 # ── IP-Mode conversion (or clean downgrade back to standard DNS mode) ───────
+IPMODE_CHANGED=0
 if [[ "$PUTER_IP_MODE" == "1" ]]; then
     apply_ip_mode
+    IPMODE_CHANGED=1
 else
     remove_ip_mode
+fi
+# A mode change rewrites bind-mounted files (Caddyfile, config.json) and the
+# caddy port mappings (override). 'compose up -d' only recreates containers on
+# SERVICE SPEC changes and never sees file CONTENT changes — so recreate
+# caddy + puter explicitly, or the stack keeps serving the previous mode.
+if [[ "$IPMODE_CHANGED" -eq 1 ]]; then
+    msg_info "Applying mode change to the running stack (recreate caddy + puter)"
+    compose_q up -d --force-recreate caddy puter || exit 1
 fi
 
 # ── Step 5: systemd unit (reboot-safe, requirement 6) ───────────────────────

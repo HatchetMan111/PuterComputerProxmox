@@ -264,6 +264,7 @@ check_dns() {
         echo -e "  Both must answer ${CT_IP} — and the client must actually USE that DNS server"
         echo -e "  (check DHCP/DNS settings; e.g. FritzBox hands out itself by default)."
         echo -e "  No wildcard-capable DNS? Fallback: PUTER_DOMAIN=<ct-ip-with-dashes>.nip.io (see README)."
+        echo -e "  Zero-DNS fallback: re-run with PUTER_IP_MODE=1 — serves API+S3 on bare IP ports, no DNS at all."
         echo ""
     fi
 }
