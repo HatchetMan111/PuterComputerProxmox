@@ -33,7 +33,10 @@ PUTER_CTHOSTNAME="${PUTER_CTHOSTNAME:-puter}"
 PUTER_OS="${PUTER_OS:-debian}"
 PUTER_VERSION_TEMPLATE="${PUTER_VERSION_TEMPLATE:-13}"
 PUTER_CORES="${PUTER_CORES:-2}"
-PUTER_RAM="${PUTER_RAM:-3072}"
+# 4 GB, not 3: the stack is MariaDB + DynamoDB Local (a JVM) + RustFS + Valkey
+# + Node. 3 GB works for a demo but swaps under real use (file uploads,
+# several apps open) — the JVM alone can hold ~1 GB.
+PUTER_RAM="${PUTER_RAM:-4096}"
 PUTER_DISK="${PUTER_DISK:-8}"
 PUTER_BRIDGE="${PUTER_BRIDGE:-vmbr0}"
 PUTER_STORAGE="${PUTER_STORAGE:-local-lvm}"

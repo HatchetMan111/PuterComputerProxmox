@@ -11,7 +11,7 @@ Dieses Repo enthält einen Installer, der Puter als **LXC-Container** auf Proxmo
 | | |
 |---|---|
 | **Proxmox VE** | 8.x oder 9.x (getestet: PVE 9.1) |
-| **Ressourcen CT** | 2 vCPU, 3 GB RAM, 8 GB Disk (Default) |
+| **Ressourcen CT** | 2 vCPU, 4 GB RAM, 8 GB Disk (Default) |
 | **Host-RAM frei** | ≥ 4 GB (Stack: MariaDB, Valkey, DynamoDB-local, RustFS, Caddy, Puter) |
 | **DNS (wichtig!)** | **Wildcard-Eintrag** `*.puter.lan → <CT-IP>` auf deinem LAN-DNS-Server |
 
@@ -93,7 +93,7 @@ Erwartete Ausgabe (Auszug):
     /_/    \___/\__,_/  Puter on Proxmox VE
         Community-Scripts-style LXC installer
 
-Info: Creating LXC 103 (puter: 2 vCPU, 3072 MiB RAM, 8 GB disk, Debian 13, storage: local-lvm)
+Info: Creating LXC 103 (puter: 2 vCPU, 4096 MiB RAM, 8 GB disk, Debian 13, storage: local-lvm)
   ✔ Created LXC 103
 Info: Running in-container installer (Docker + Puter stack + systemd) — takes several minutes
   ✔ In-container install finished (log: /var/log/puter-install.log)
@@ -123,7 +123,7 @@ Info: Verifying web UI from the Proxmox host: http://192.168.178.50:80/
 | `PUTER_CTID` | prompt | CT-ID (Enter = nächste freie) |
 | `PUTER_DOMAIN` | prompt (`puter.lan`) | Domain mit Wildcard-DNS |
 | `PUTER_PORT` | `80` | Web-UI-Port |
-| `PUTER_CORES` / `PUTER_RAM` / `PUTER_DISK` | 2 / 3072 / 8 | CT-Ressourcen |
+| `PUTER_CORES` / `PUTER_RAM` / `PUTER_DISK` | 2 / 4096 / 8 | CT-Ressourcen (4 GB: MariaDB + DynamoDB Local (JVM) + RustFS + Node) |
 | `PUTER_STORAGE` | `local-lvm` | Storage für CT-Rootfs |
 | `PUTER_BRIDGE` | `vmbr0` | Netzwerk-Bridge |
 | `PUTER_VERSION_TEMPLATE` | `13` | Debian-Version des LXC-Templates |

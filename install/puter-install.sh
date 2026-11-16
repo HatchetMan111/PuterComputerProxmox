@@ -315,10 +315,38 @@ else
     msg_ok "Docker log rotation already configured"
 fi
 
-# ── Step 4: Puter stack — official installer or update ──────────────────────
+# ── Step 4: Puter stack — official installer (fresh + update) ───────────────
 mkdir -p "$INSTALL_ROOT"
 
-if [[ -f "${COMPOSE_DIR}/docker-compose.yml" && -f "${COMPOSE_DIR}/.env" ]]; then
+# Official installer wrapper (idempotent): downloads the CURRENT
+# docker-compose.yml + caddy/Caddyfile from upstream, generates secrets ONLY
+# when .env/config.json are missing, then runs `docker compose up -d`.
+# Output is tee'd to a temp log so a Docker idmap failure can be diagnosed
+# with the real cause instead of a generic error.
+run_official_installer() {
+    local log
+    log=$(mktemp /tmp/puter-official-XXXXXX.log)
+    if ! curl -fsSL https://raw.githubusercontent.com/HeyPuter/puter/main/install.sh \
+        | env PUTER_DIR="$COMPOSE_DIR" \
+              PUTER_DOMAIN="$PUTER_DOMAIN" \
+              PUTER_PORT="$PUTER_PORT" \
+              PUTER_ENV=prod \
+              PUTER_TRUST_PROXY=1 \
+              sh 2>&1 | tee "$log"; then
+        if is_idmap_failure "$log"; then
+            print_idmap_diagnosis
+        else
+            msg_error "Official Puter installer failed — full output above"
+        fi
+        rm -f "$log"
+        return 1
+    fi
+    rm -f "$log"
+    return 0
+}
+
+if [[ -f "${COMPOSE_DIR}/docker-compose.yml" && -f "${COMPOSE_DIR}/.env" \
+      && -f "${COMPOSE_DIR}/puter/config/config.json" ]]; then
     msg_info "Existing Puter installation found in ${COMPOSE_DIR} — updating"
     cd "$COMPOSE_DIR"
     # Re-apply the data-dir permissions the official installer sets (0777 for
@@ -331,34 +359,30 @@ if [[ -f "${COMPOSE_DIR}/docker-compose.yml" && -f "${COMPOSE_DIR}/.env" ]]; the
         puter/data/s3 puter/data/puter puter/data/caddy 2>/dev/null || true
     chmod 0777 puter/config 2>/dev/null || true
     chmod 0666 puter/config/config.json 2>/dev/null || true
+    # Refresh the STACK DEFINITION from upstream (compose file + Caddyfile).
+    # Without this an install ran the compose file from its FIRST install
+    # forever: new services, image changes and fixes upstream never arrived,
+    # so the stack silently stayed on an old version. Secrets/data stay put.
+    msg_info "Refreshing docker-compose.yml + Caddyfile from upstream (secrets kept)"
+    run_official_installer || exit 1
+    # Newest images + apply the refreshed definition.
     compose_q pull || exit 1
     compose_q up -d --remove-orphans || exit 1
-    msg_ok "Puter stack updated (compose pull + up)"
+    msg_ok "Puter stack updated (stack files refreshed + compose pull + up)"
+    msg_info "Puter image now: $(docker compose images puter 2>/dev/null | tail -n1)"
+elif [[ -f "${COMPOSE_DIR}/docker-compose.yml" ]]; then
+    # Half-installed: NEVER let the official installer run here — it would
+    # generate NEW secrets while the MariaDB data dir is already initialised
+    # with the old password (ER_ACCESS_DENIED boot loop).
+    msg_error "Incomplete Puter installation in ${COMPOSE_DIR} — missing .env or puter/config/config.json."
+    msg_error "The official installer would generate NEW secrets while MariaDB already holds the old"
+    msg_error "password (ER_ACCESS_DENIED). Restore the missing file from a backup, or move"
+    msg_error "${COMPOSE_DIR} aside and install fresh."
+    exit 1
 else
     msg_info "Running official Puter self-host installer"
     msg_info "  PUTER_DIR=${COMPOSE_DIR}  PUTER_DOMAIN=${PUTER_DOMAIN}  PUTER_PORT=${PUTER_PORT}"
-    # Official installer: downloads docker-compose.yml + caddy/Caddyfile,
-    # generates secrets, writes .env + puter/config/config.json (idempotent:
-    # keeps existing secrets), runs docker compose up -d.
-    # Output is tee'd to a temp log so a Docker idmap failure can be diagnosed
-    # with the real cause instead of a generic error.
-    OFFICIAL_LOG=$(mktemp /tmp/puter-official-XXXXXX.log)
-    if ! curl -fsSL https://raw.githubusercontent.com/HeyPuter/puter/main/install.sh \
-        | env PUTER_DIR="$COMPOSE_DIR" \
-              PUTER_DOMAIN="$PUTER_DOMAIN" \
-              PUTER_PORT="$PUTER_PORT" \
-              PUTER_ENV=prod \
-              PUTER_TRUST_PROXY=1 \
-              sh 2>&1 | tee "$OFFICIAL_LOG"; then
-        if is_idmap_failure "$OFFICIAL_LOG"; then
-            print_idmap_diagnosis
-        else
-            msg_error "Official Puter installer failed — full output above"
-        fi
-        rm -f "$OFFICIAL_LOG"
-        exit 1
-    fi
-    rm -f "$OFFICIAL_LOG"
+    run_official_installer || exit 1
     msg_ok "Puter stack installed via official installer"
     # NOTE: the official installer cd's in its own subshell — our cwd is still
     # wherever pct exec started us (usually /). cd explicitly, otherwise
