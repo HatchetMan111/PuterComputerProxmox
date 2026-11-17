@@ -53,6 +53,8 @@ Hinweise: Nur die DNS-Auflösung läuft über einen öffentlichen Dienst — App
 
 #### IP-Mode: ganz ohne DNS (`PUTER_IP_MODE=1`)
 
+> **Der Installer fragt von selbst.** Sobald die CT-IP bekannt ist, prüft er, ob `api.<domain>` schon auf diese IP zeigt. Tut es das nicht, bietet er **vor** dem mehrminütigen Install den Wechsel in den IP-Mode an (Default `Y`, mit `n` abwählbar). Grund: Ohne Wildcard-DNS lädt zwar die Desktop-Hülle, aber jeder API-Aufruf läuft ins Leere — sichtbar als weiße Seite bzw. „undefined value" statt als verständliche Fehlermeldung. In nicht-interaktiven Läufen (gepiped) wird nie still umgestellt; dort wird stattdessen der fertige IP-Mode-Befehl ausgegeben.
+
 Für Umgebungen mit unbekanntem DNS-Server (kein Wildcard möglich, kein nip.io gewünscht): Der Installer biegt API + S3 auf reine IP-Ports um — Caddy schreibt den Host-Header serverseitig auf `api.<CT-IP>` um, sodass Puters Subdomain-Gate greift, während Browser nur die CT-IP ansprechen. Komplett lokal, kein externer Dienst:
 
 ```bash

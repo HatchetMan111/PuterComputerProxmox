@@ -443,7 +443,44 @@ if [[ -z "$CT_IP" ]]; then
 fi
 msg_ok "Container IP: ${CT_IP}"
 
+# ── Pre-flight DNS check (BEFORE the multi-minute install) ──────────────────
+# Puter gates its entire backend behind api.<domain>: the GUI shell always
+# loads from the bare IP, but every API call needs that name to resolve. A
+# missing wildcard record therefore only shows up AFTER the full install —
+# as a white screen / "undefined value" — which is exactly what the old
+# end-of-install warning was too late to prevent. Ask here instead.
+# Skipped in IP-Mode (no DNS needed by design).
+if [[ "$PUTER_IP_MODE" != "1" ]]; then
+    DNS_PRECHECK=$(getent hosts "api.${PUTER_DOMAIN}" 2>/dev/null | awk '{print $1}' | head -n1 || true)
+    if [[ "$DNS_PRECHECK" != "$CT_IP" ]]; then
+        echo ""
+        echo -e "${YW}  ⚠ api.${PUTER_DOMAIN} does not resolve to ${CT_IP} (yet)${CL}"
+        echo -e "  ${BOLD}Puter needs a wildcard record:${CL}  *.${PUTER_DOMAIN} -> ${CT_IP}"
+        echo -e "  Without it the desktop loads, but login/API calls fail —"
+        echo -e "  you get a white page / 'undefined value' instead of the GUI."
+        echo ""
+        if [[ -t 0 ]]; then
+            ASK_IPMODE=""
+            read -r -p "$(echo -e "${YW}Switch to IP-Mode now (API+S3 on bare IP ports, no DNS needed)? [Y/n]:${CL}") " ASK_IPMODE || ASK_IPMODE=""
+            case "${ASK_IPMODE:-Y}" in
+                [Nn]*)
+                    msg_info "Keeping DNS mode — add the wildcard record, then re-run (update mode) if the page stays white"
+                    ;;
+                *)
+                    PUTER_IP_MODE=1
+                    msg_info "Switched to IP-Mode — no DNS required from here on"
+                    ;;
+            esac
+        else
+            echo -e "${YW}  Non-interactive run: keeping DNS mode.${CL}"
+            echo -e "${YW}  If the web UI stays white, re-run with PUTER_IP_MODE=1:${CL}"
+            echo -e "    ${BOLD}PUTER_IP_MODE=1 PUTER_CTID=${PUTER_CTID} bash -c \"\$(wget -qLO - ${PUTER_REPO_RAW}/install/puter.sh)\"${CL}"
+        fi
+    fi
+fi
+
 # IP-Mode: domain IS the CT IP (assigned now that the IP is known); no DNS.
+# Runs after the pre-flight check above, so a mid-run switch is picked up.
 if [[ "$PUTER_IP_MODE" == "1" ]]; then
     PUTER_DOMAIN="$CT_IP"
     msg_info "IP-Mode: domain = CT IP (${CT_IP}); no DNS needed (API :${PUTER_API_PORT}, S3 :${PUTER_S3_PORT})"
@@ -592,7 +629,9 @@ else
     if [[ "${DNS_OK:-0}" -eq 1 ]]; then
         echo -e "  ${BGN}DNS     :${CL} *.${PUTER_DOMAIN} -> ${CT_IP}  ${GN}(resolving ✓)${CL}"
     else
-        echo -e "  ${BGN}DNS     :${CL} *.${PUTER_DOMAIN} -> ${CT_IP}  ${RD}(NOT resolving — fix DNS, see warning above!)${CL}"
+        echo -e "  ${BGN}DNS     :${CL} *.${PUTER_DOMAIN} -> ${CT_IP}  ${RD}(NOT resolving — login/API will fail!)${CL}"
+        echo -e "  ${BGN}Fix    :${CL} add the wildcard record on your DNS, or switch to no-DNS mode:"
+        echo -e "          ${BOLD}PUTER_IP_MODE=1 PUTER_CTID=${PUTER_CTID} bash -c \"\$(wget -qLO - ${PUTER_REPO_RAW}/install/puter.sh)\"${CL}"
     fi
 fi
 if [[ -n "$ADMIN_PW" ]]; then
