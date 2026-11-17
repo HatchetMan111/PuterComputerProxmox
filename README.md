@@ -2,9 +2,59 @@
 
 **Puter** ([HeyPuter/puter](https://github.com/HeyPuter/puter)) — das Open-Source „Internet Computer": selbst-gehostete Personal Cloud mit Desktop-Umgebung im Browser, Dateiverwaltung, Apps und puter.js.
 
+**The Backend for AI-Generated Apps** — eine sichere, produktionsreife Backend-Schicht für KI-gebaute Apps: Auth, Storage, Datenbank, AI-Gateway und mehr (siehe [„Was man damit machen kann"](#was-man-damit-machen-kann)). Statt für jede App wieder Login, Datei-Upload, DB und API-Keys neu zu bauen, hängt sich die App an **ein** Konto und **eine** Instanz.
+
 Dieses Repo enthält einen Installer, der Puter als **LXC-Container** auf Proxmox VE installiert — im Stil und Look der [Proxmox VE Community Scripts](https://community-scripts.github.io/ProxmoxVE).
 
 ---
+
+## Was man damit machen kann
+
+Deine Instanz ist damit mehr als eine Cloud-Oberfläche — sie ist das **Backend für Apps, die du (oder eine KI) baust**. Die Bausteine stecken alle in dieser einen CT:
+
+| Baustein | Was es löst | SDK-Aufruf (puter.js) |
+|---|---|---|
+| **Auth** | Login/Registrierung, Sessions, Profile — ohne eigene User-Tabelle | `puter.auth.signIn()`, `signOut()`, `whoami()`, `getProfile()` |
+| **Storage** | Dateien legen, lesen, hochladen, teilen — mit granularen Rechten | `puter.fs.write/read/upload/mkdir/stat`, `share()`, `getReadURL()` |
+| **Datenbank (KV)** | Key-Value-Store für App-Daten, Zähler, Tokens, Sessions | `puter.kv.set/get/del/incr/list/expire()` |
+| **AI Gateway** | Chat, Bild, Sprache, Video über **einen** Zugang — inkl. lokalem Ollama | `puter.ai.chat()`, `txt2img()`, `img2txt()`, `txt2speech()`, `speech2txt()`, `txt2vid()` |
+| **App-Hosting** | Statische Apps deployen, ohne eigenen Webserver | `puter.hosting.create/list/update/delete()` |
+| **Netzwerk** | WebSocket/TLS aus der App heraus, auch durch/firewall-freundlich | `puter.net` (PSocket/pFetch) |
+| **Events/Realtime** | Live-Updates ohne eigenen Socket-Server | `puter.…` Event-Module, `realtime` |
+
+### Das konkret bedeutet
+
+- **„App in 20 Minuten statt in 2 Wochen":** Ein KI-Assistent (Claude, Cursor, …) baut dir eine Web-App, und du musst *kein* Backend schreiben — Login, Uploads, Datenbank und KI-Zugriffe bringt die Instanz mit. Zwei Zeilen SDK-Einbindung, fertig:
+
+  ```html
+  <!-- Standard: die gehostete SDK. Für self-hosted auf die eigene Instanz zeigen
+       lassen (config.json: "gui_puterjs_bundle": "http://<CT-IP>/puter.js/v2/"),
+       sonst redet die App mit puter.com statt mit deiner Cloud. -->
+  <script src="https://js.puter.com/v2/"></script>
+  <script>
+    // Datei ablegen (Storage) — kein S3, kein Server, kein Key
+    await puter.fs.write('notiz.txt', 'Hallo aus meiner App');
+
+    // KI fragen (AI Gateway) — kein OpenAI-Key im Client
+    const antwort = await puter.ai.chat('Fasse den Text zusammen', { model: 'gpt-4o-mini' });
+
+    // Zähler in der App-DB (KV)
+    const aufrufe = await puter.kv.incr('meine-app:aufrufe');
+  </script>
+  ```
+
+- **Login ohne Passwort-Handling:** `puter.auth.signIn()` öffnet den Puter-Login; die App bekommt ein Token für genau ihren Scope. Keine eigene User-DB, kein „Passwort vergessen".
+- **Dateien mit Rechten statt mit Links:** `puter.fs.share()` gibt einzelne Ordner/Dateien frei — widerrufbar, ohne dass du Signed-URLs selbst verwalten musst.
+- **Ein AI-Zugang für alles:** Das Gateway bündelt Chat, OCR (`img2txt`), TTS/STT, Bild- und Video-Generierung hinter einer SDK-Methode. Die Provider-Keys liegen bei dir, nicht im Client-`fetch`.
+- **Eigene KI im LAN:** Mit dem Docker-Profil `ai` startet ein **lokaler Ollama** (Default `tinyllama`, ~700 MB RAM) — dann läuft `puter.ai.chat()` vollständig ohne Internet und ohne fremde API-Kosten. (Bewusst nicht Standard: kostet RAM. Aktivierung ist als Ausbau geplant — siehe unten.)
+- **App-Hosting inklusive:** `puter.hosting.create()` legt eine statische App unter deiner Domain ab — praktisch für KI-generierte Frontends, die kein Backend brauchen.
+- **Alles bleibt bei dir:** Diese CT ist die komplette Backend-Infrastruktur — Daten, Dateien, Modelle. Keine Cloud-Abhängigkeit, keine Miete.
+
+### Grenzen (ehrlich)
+
+- **User-Site-/App-Hosting mit dynamischen Subdomains** (`<name>.site.<domain>`) braucht Wildcard-DNS. Im IP-Mode (ohne DNS) läuft der Desktop samt Dateien, Apps, Storage, KV und KI — nur dieses eine Feature nicht.
+- **KI-Modelle ohne lokales Ollama** laufen über die jeweiligen Provider (OpenRouter etc.), also mit deren Kosten/Keys.
+- **Kein SMTP an Bord:** Es wird keine Mail verschickt; für den Login brauchst du das `admin`-Temp-Passwort aus dem Installer-Finish-Block bzw. `docker compose logs puter | grep "password for admin"` (wird bei jedem Boot neu gedruckt, bis du es änderst).
 
 ## Voraussetzungen
 
